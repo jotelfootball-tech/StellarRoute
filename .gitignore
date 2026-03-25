@@ -42,6 +42,8 @@ build/
 # Node
 node_modules/
 .npm/
+frontend/node_modules/
+sdk-js/node_modules/
 
 # Test coverage
 tarpaulin-report.html
