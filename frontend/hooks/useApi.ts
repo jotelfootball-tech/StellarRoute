@@ -149,8 +149,6 @@ export function useOrderbook(
 // useQuote — debounced amount; no request while input is invalid / empty
 // ---------------------------------------------------------------------------
 
-const QUOTE_AMOUNT_DEBOUNCE_MS = 450;
-
 export function useQuote(
   base: string,
   quote: string,
