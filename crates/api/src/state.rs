@@ -6,6 +6,7 @@ use std::{sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 
 use crate::cache::CacheManager;
+use crate::routes::ws::WsState;
 
 /// Cache policy configuration
 #[derive(Debug, Clone)]
@@ -58,6 +59,8 @@ pub struct AppState {
     pub cache_policy: CachePolicy,
     /// Cache hit/miss counters
     pub cache_metrics: Arc<CacheMetrics>,
+    /// WebSocket state (optional)
+    pub ws: Option<Arc<WsState>>,
 }
 
 impl AppState {
@@ -74,6 +77,7 @@ impl AppState {
             version: env!("CARGO_PKG_VERSION").to_string(),
             cache_policy,
             cache_metrics: Arc::new(CacheMetrics::default()),
+            ws: None,
         }
     }
 
@@ -94,7 +98,14 @@ impl AppState {
             version: env!("CARGO_PKG_VERSION").to_string(),
             cache_policy,
             cache_metrics: Arc::new(CacheMetrics::default()),
+            ws: None,
         }
+    }
+
+    /// Attach WebSocket state to the application state.
+    pub fn with_ws(mut self, ws: Arc<WsState>) -> Self {
+        self.ws = Some(ws);
+        self
     }
 
     /// Wrap in Arc for sharing across handlers
