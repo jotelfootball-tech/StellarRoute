@@ -2,14 +2,14 @@ use crate::adapters::AmmAdapter;
 use crate::errors::ContractError;
 use crate::events;
 use crate::storage::{
-    self, batch_check_pools, extend_instance_ttl, get_fee_rate,
-    increment_nonce, transfer_asset, StorageKey, INSTANCE_TTL_EXTEND_TO, POOL_TTL_EXTEND_TO,
-    INSTANCE_TTL_THRESHOLD, POOL_TTL_THRESHOLD,
+    self, batch_check_pools, extend_instance_ttl, get_fee_rate, increment_nonce, transfer_asset,
+    StorageKey, INSTANCE_TTL_EXTEND_TO, INSTANCE_TTL_THRESHOLD, POOL_TTL_EXTEND_TO,
+    POOL_TTL_THRESHOLD,
 };
 use crate::types::{
     CommitmentData, ContractVersion, DistributionRecord, FeeConfig, GovernanceConfig, MevConfig,
-    Proposal, ProposalAction, QuoteResult, Route, SwapParams, SwapResult, TokenCategory, TokenInfo,
-    TTLStatus,
+    Proposal, ProposalAction, QuoteResult, Route, SwapParams, SwapResult, TTLStatus, TokenCategory,
+    TokenInfo,
 };
 use crate::{governance, tokens, upgrade};
 use soroban_sdk::{
@@ -59,6 +59,10 @@ impl StellarRoute {
         if fee_rate > 1000 {
             return Err(ContractError::InvalidAmount);
         }
+        // admin and fee_to must be distinct addresses.
+        if admin == fee_to {
+            return Err(ContractError::InvalidAmount);
+        }
 
         e.storage().instance().set(&StorageKey::Admin, &admin);
         e.storage().instance().set(&StorageKey::FeeRate, &fee_rate);
@@ -92,6 +96,13 @@ impl StellarRoute {
         }
         let admin = storage::get_admin(&e);
         admin.require_auth();
+        // Reject no-op and contract-as-admin.
+        if new_admin == admin {
+            return Err(ContractError::InvalidAmount);
+        }
+        if new_admin == e.current_contract_address() {
+            return Err(ContractError::InvalidRecipient);
+        }
 
         e.storage().instance().set(&StorageKey::Admin, &new_admin);
         events::admin_changed(&e, admin, new_admin);
@@ -216,6 +227,10 @@ impl StellarRoute {
             return Err(ContractError::UseGovernance);
         }
         storage::get_admin(&e).require_auth();
+        // Prevent registering the router itself as a pool.
+        if pool == e.current_contract_address() {
+            return Err(ContractError::InvalidRecipient);
+        }
 
         let key = StorageKey::SupportedPool(pool.clone());
         if e.storage().persistent().has(&key) {
@@ -448,6 +463,21 @@ impl StellarRoute {
 
     pub fn configure_mev(e: Env, config: MevConfig) -> Result<(), ContractError> {
         storage::get_admin(&e).require_auth();
+        if config.commitment_required_above <= 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+        if config.rate_limit_window_ledgers == 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+        if config.rate_limit_max_swaps == 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+        if config.max_price_impact_bps > 10_000 {
+            return Err(ContractError::InvalidAmount);
+        }
+        if config.max_execution_spread_bps > 10_000 {
+            return Err(ContractError::InvalidAmount);
+        }
         storage::set_mev_config(&e, &config);
         extend_instance_ttl(&e);
         Ok(())
@@ -488,6 +518,10 @@ impl StellarRoute {
         StellarRoute::require_not_paused(&e)?;
 
         if deposit_amount <= 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+        // Reject zeroed commitment hash — sentinel value, trivial replay risk.
+        if commitment_hash == BytesN::from_array(&e, &[0u8; 32]) {
             return Err(ContractError::InvalidAmount);
         }
 
@@ -702,6 +736,13 @@ impl StellarRoute {
             return Err(ContractError::InvalidAmount);
         }
         if params.min_amount_out < 0 || params.route.min_output < 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+        // Basis-point guard fields must be ≤ 10000 (100%).
+        if params.max_price_impact_bps > 10_000 {
+            return Err(ContractError::InvalidAmount);
+        }
+        if params.max_execution_spread_bps > 10_000 {
             return Err(ContractError::InvalidAmount);
         }
 

@@ -1,4 +1,5 @@
 import type {
+  ApiErrorCode,
   HealthStatus,
   Orderbook,
   PairsResponse,
@@ -9,68 +10,299 @@ import type {
 } from './types.js';
 import { DEFAULT_STALENESS_CONFIG, isQuoteStale, isQuoteExpired } from './types.js';
 
-const DEFAULT_TIMEOUT_MS = 10_000;
+// ── Constants ─────────────────────────────────────────────────────────────────
 
+const DEFAULT_BASE_URL = 'http://localhost:8080';
+const DEFAULT_TIMEOUT_MS = 10_000;
+const DEFAULT_RETRIES = 2;
+
+// ── Error class ───────────────────────────────────────────────────────────────
+
+/**
+ * Thrown by {@link StellarRouteClient} for any non-2xx API response or
+ * network failure.
+ *
+ * @example
+ * ```ts
+ * try {
+ *   await client.getOrderbook('native', 'GHOST');
+ * } catch (err) {
+ *   if (isStellarRouteApiError(err) && err.isNotFound()) {
+ *     console.log('pair not found');
+ *   }
+ * }
+ * ```
+ */
 export class StellarRouteApiError extends Error {
+  /** HTTP status code. `0` for network-level failures. */
+  public readonly status: number;
+  /** Machine-readable error code from the API response body. */
+  public readonly code: ApiErrorCode;
+  /** Optional structured context from the API response body. */
+  public readonly details?: unknown;
+
   constructor(
-    public readonly status: number,
-    public readonly code: string,
+    status: number,
+    code: ApiErrorCode,
     message: string,
-    public readonly details?: unknown,
+    details?: unknown,
   ) {
     super(message);
     this.name = 'StellarRouteApiError';
+    this.status = status;
+    this.code = code;
+    this.details = details;
+  }
+
+  /** Returns `true` when the API returned 404 Not Found. */
+  isNotFound(): boolean {
+    return this.status === 404 || this.code === 'not_found';
+  }
+
+  /** Returns `true` when the request was rate-limited (HTTP 429). */
+  isRateLimited(): boolean {
+    return this.status === 429 || this.code === 'rate_limit_exceeded';
+  }
+
+  /** Returns `true` for bad-request validation errors (HTTP 400). */
+  isValidationError(): boolean {
+    return (
+      this.status === 400 ||
+      this.code === 'validation_error' ||
+      this.code === 'invalid_asset'
+    );
+  }
+
+  /** Returns `true` for network-level failures (no HTTP response). */
+  isNetworkError(): boolean {
+    return this.status === 0;
   }
 }
 
-const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
-
-interface FetchOptions {
-  signal?: AbortSignal;
+/**
+ * Type guard — returns `true` when `err` is a {@link StellarRouteApiError}.
+ */
+export function isStellarRouteApiError(err: unknown): err is StellarRouteApiError {
+  return err instanceof StellarRouteApiError;
 }
 
+// ── Client options ────────────────────────────────────────────────────────────
+
+/**
+ * Options accepted by the {@link StellarRouteClient} constructor.
+ */
+export interface StellarRouteClientOptions {
+  /**
+   * Base URL of the StellarRoute API.
+   * @default "http://localhost:8080"
+   */
+  baseUrl?: string;
+  /**
+   * Request timeout in milliseconds.
+   * @default 10_000
+   */
+  timeoutMs?: number;
+  /**
+   * Number of automatic retries on 429 / 5xx / network errors.
+   * @default 2
+   */
+  retries?: number;
+  /**
+   * Additional headers sent with every request.
+   */
+  headers?: Record<string, string>;
+}
+
+// ── Client ────────────────────────────────────────────────────────────────────
+
+/**
+ * Async HTTP client for the StellarRoute REST API.
+ *
+ * @example
+ * ```ts
+ * import { StellarRouteClient } from '@stellarroute/sdk-js';
+ *
+ * const client = new StellarRouteClient({ baseUrl: 'https://api.stellarroute.io' });
+ *
+ * const health = await client.getHealth();
+ * console.log(health.status); // "healthy"
+ *
+ * const quote = await client.getQuote('native', 'USDC', 100);
+ * console.log(quote.price);
+ * ```
+ */
 export class StellarRouteClient {
   private readonly baseUrl: string;
+  private readonly timeoutMs: number;
+  private readonly retries: number;
+  private readonly extraHeaders: Record<string, string>;
 
-  constructor(baseUrl = 'http://localhost:8080') {
-    this.baseUrl = baseUrl.replace(/\/$/, '');
+  constructor(options: StellarRouteClientOptions | string = {}) {
+    // Accept a plain string for backward compatibility.
+    if (typeof options === 'string') {
+      options = { baseUrl: options };
+    }
+    this.baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/$/, '');
+    this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.retries = options.retries ?? DEFAULT_RETRIES;
+    this.extraHeaders = options.headers ?? {};
   }
+
+  // ── Public API methods ──────────────────────────────────────────────────────
+
+  /**
+   * `GET /health` — probe service and dependency health.
+   */
+  getHealth(signal?: AbortSignal): Promise<HealthStatus> {
+    return this.request<HealthStatus>('/health', signal);
+  }
+
+  /**
+   * `GET /api/v1/pairs` — list active trading pairs.
+   */
+  getPairs(signal?: AbortSignal): Promise<PairsResponse> {
+    return this.request<PairsResponse>('/api/v1/pairs', signal);
+  }
+
+  /**
+   * `GET /api/v1/orderbook/{base}/{quote}` — fetch orderbook snapshot.
+   *
+   * @throws {@link StellarRouteApiError} with `status === 404` when the pair
+   *   has no active offers.
+   */
+  getOrderbook(
+    base: string,
+    quote: string,
+    signal?: AbortSignal,
+  ): Promise<Orderbook> {
+    const path = `/api/v1/orderbook/${encodeURIComponent(base)}/${encodeURIComponent(quote)}`;
+    return this.request<Orderbook>(path, signal);
+  }
+
+  /**
+   * `GET /api/v1/quote/{base}/{quote}` — get best price quote.
+   *
+   * @param base   Base asset identifier: `"native"`, `"CODE"`, or `"CODE:ISSUER"`.
+   * @param quote  Quote asset identifier.
+   * @param amount Amount of the base asset to trade. Defaults to `1`.
+   * @param type   Direction of the quote (`"sell"` or `"buy"`). Defaults to `"sell"`.
+   *
+   * @throws {@link StellarRouteApiError} with `status === 404` when no route exists.
+   * @throws {@link StellarRouteApiError} with `status === 400` for invalid params.
+   */
+  getQuote(
+    base: string,
+    quote: string,
+    amount?: number,
+    type: QuoteType = 'sell',
+    signal?: AbortSignal,
+  ): Promise<PriceQuote> {
+    const params = new URLSearchParams({ quote_type: type });
+    if (amount !== undefined) params.set('amount', String(amount));
+    const path = `/api/v1/quote/${encodeURIComponent(base)}/${encodeURIComponent(quote)}?${params}`;
+    return this.request<PriceQuote>(path, signal);
+  }
+
+  /**
+   * Get a quote and validate it is not stale or expired.
+   * Throws {@link StellarRouteApiError} with code `"quote_expired"` or
+   * `"quote_stale"` when the quote fails the staleness check.
+   */
+  async getQuoteWithValidation(
+    base: string,
+    quote: string,
+    amount?: number,
+    type: QuoteType = 'sell',
+    stalenessConfig: QuoteStalenessConfig = DEFAULT_STALENESS_CONFIG,
+    signal?: AbortSignal,
+  ): Promise<PriceQuote> {
+    const quoteResponse = await this.getQuote(base, quote, amount, type, signal);
+
+    if (isQuoteExpired(quoteResponse)) {
+      throw new StellarRouteApiError(
+        0,
+        'quote_expired',
+        'Quote has expired based on server-provided expiry time',
+        { expires_at: quoteResponse.expires_at },
+      );
+    }
+
+    if (stalenessConfig.reject_stale && isQuoteStale(quoteResponse, stalenessConfig)) {
+      throw new StellarRouteApiError(
+        0,
+        'quote_stale',
+        `Quote is stale (older than ${stalenessConfig.max_age_seconds} seconds)`,
+        { timestamp: quoteResponse.timestamp, max_age_seconds: stalenessConfig.max_age_seconds },
+      );
+    }
+
+    return quoteResponse;
+  }
+
+  /**
+   * Convenience wrapper around {@link getQuote} that returns only the routing
+   * path steps.
+   */
+  async getRoutes(    base: string,
+    quote: string,
+    amount?: number,
+    type: QuoteType = 'sell',
+    signal?: AbortSignal,
+  ): Promise<PathStep[]> {
+    const quoteResponse = await this.getQuote(base, quote, amount, type, signal);
+    return quoteResponse.path;
+  }
+
+  // ── Internal helpers ────────────────────────────────────────────────────────
 
   private async request<T>(
     path: string,
-    opts: FetchOptions = {},
-    retries = 2,
+    signal?: AbortSignal,
+    attemptsLeft = this.retries,
   ): Promise<T> {
     const url = `${this.baseUrl}${path}`;
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
-    opts.signal?.addEventListener('abort', () => controller.abort());
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+
+    // Forward external cancellation into our controller.
+    signal?.addEventListener('abort', () => controller.abort(), { once: true });
 
     try {
       const response = await fetch(url, {
-        headers: { Accept: 'application/json' },
+        headers: {
+          Accept: 'application/json',
+          ...this.extraHeaders,
+        },
         signal: controller.signal,
       });
 
       if (!response.ok) {
-        let code = 'unknown_error';
+        // Parse the structured error body when available.
+        let code: ApiErrorCode = 'unknown_error';
         let message = `HTTP ${response.status}`;
         let details: unknown;
 
         try {
-          const body = await response.json();
-          code = body.error ?? code;
-          message = body.message ?? message;
+          const body = (await response.json()) as {
+            error?: string;
+            message?: string;
+            details?: unknown;
+          };
+          if (body.error) code = body.error as ApiErrorCode;
+          if (body.message) message = body.message;
           details = body.details;
         } catch {
-          // Keep default values for non-JSON response bodies
+          // Non-JSON body — keep defaults.
         }
 
-        if ((response.status === 429 || response.status >= 500) && retries > 0) {
-          const retryAfter =
-            Number(response.headers.get('Retry-After') ?? 1) * 1_000;
-          await sleep(retryAfter || 1_000 * (3 - retries));
-          return this.request<T>(path, opts, retries - 1);
+        // Retry on 429 and 5xx.
+        if ((response.status === 429 || response.status >= 500) && attemptsLeft > 0) {
+          const retryAfterSec = Number(response.headers.get('Retry-After') ?? 0);
+          const delayMs = retryAfterSec > 0
+            ? retryAfterSec * 1_000
+            : backoffMs(this.retries - attemptsLeft);
+          await sleep(delayMs);
+          return this.request<T>(path, signal, attemptsLeft - 1);
         }
 
         throw new StellarRouteApiError(response.status, code, message, details);
@@ -79,9 +311,11 @@ export class StellarRouteClient {
       return response.json() as Promise<T>;
     } catch (err) {
       if (err instanceof StellarRouteApiError) throw err;
-      if (retries > 0) {
-        await sleep(500 * (3 - retries));
-        return this.request<T>(path, opts, retries - 1);
+
+      // Retry on network errors.
+      if (attemptsLeft > 0) {
+        await sleep(backoffMs(this.retries - attemptsLeft));
+        return this.request<T>(path, signal, attemptsLeft - 1);
       }
 
       const message = err instanceof Error ? err.message : 'Network error';
@@ -90,82 +324,12 @@ export class StellarRouteClient {
       clearTimeout(timer);
     }
   }
-
-  getHealth(opts?: FetchOptions): Promise<HealthStatus> {
-    return this.request<HealthStatus>('/health', opts);
-  }
-
-  getPairs(opts?: FetchOptions): Promise<PairsResponse> {
-    return this.request<PairsResponse>('/api/v1/pairs', opts);
-  }
-
-  getOrderbook(
-    base: string,
-    quote: string,
-    opts?: FetchOptions,
-  ): Promise<Orderbook> {
-    const path = `/api/v1/orderbook/${encodeURIComponent(base)}/${encodeURIComponent(quote)}`;
-    return this.request<Orderbook>(path, opts);
-  }
-
-  getQuote(
-    base: string,
-    quote: string,
-    amount?: number,
-    type: QuoteType = 'sell',
-    opts?: FetchOptions,
-  ): Promise<PriceQuote> {
-    const params = new URLSearchParams({ quote_type: type });
-    if (amount !== undefined) params.set('amount', String(amount));
-    const path = `/api/v1/quote/${encodeURIComponent(base)}/${encodeURIComponent(quote)}?${params}`;
-    return this.request<PriceQuote>(path, opts);
-  }
-
-  /**
-   * Get a quote with staleness validation.
-   * Throws if the quote is stale or expired based on the provided config.
-   */
-  async getQuoteWithValidation(
-    base: string,
-    quote: string,
-    amount?: number,
-    type: QuoteType = 'sell',
-    stalenessConfig: QuoteStalenessConfig = DEFAULT_STALENESS_CONFIG,
-    opts?: FetchOptions,
-  ): Promise<PriceQuote> {
-    const quoteResponse = await this.getQuote(base, quote, amount, type, opts);
-    
-    // Check if expired (server-provided expiry)
-    if (isQuoteExpired(quoteResponse)) {
-      throw new StellarRouteApiError(
-        0,
-        'quote_expired',
-        'Quote has expired based on server-provided expiry time',
-        { expires_at: quoteResponse.expires_at }
-      );
-    }
-    
-    // Check if stale (client-side staleness detection)
-    if (stalenessConfig.reject_stale && isQuoteStale(quoteResponse, stalenessConfig)) {
-      throw new StellarRouteApiError(
-        0,
-        'quote_stale',
-        `Quote is stale (older than ${stalenessConfig.max_age_seconds} seconds)`,
-        { timestamp: quoteResponse.timestamp, max_age_seconds: stalenessConfig.max_age_seconds }
-      );
-    }
-    
-    return quoteResponse;
-  }
-
-  async getRoutes(
-    base: string,
-    quote: string,
-    amount?: number,
-    type: QuoteType = 'sell',
-    opts?: FetchOptions,
-  ): Promise<PathStep[]> {
-    const quoteResponse = await this.getQuote(base, quote, amount, type, opts);
-    return quoteResponse.path;
-  }
 }
+
+// ── Utilities ─────────────────────────────────────────────────────────────────
+
+const sleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Exponential back-off: 500 ms, 1 s, 2 s, … */
+const backoffMs = (attempt: number): number => 500 * Math.pow(2, attempt);

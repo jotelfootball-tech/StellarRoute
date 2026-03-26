@@ -11,7 +11,7 @@ import {
 describe('Quote staleness utilities', () => {
   const createQuote = (overrides: Partial<PriceQuote> = {}): PriceQuote => ({
     base_asset: { asset_type: 'native' },
-    quote_asset: { asset_code: 'USDC', asset_issuer: 'test' },
+    quote_asset: { asset_type: 'credit_alphanum4' as const, asset_code: 'USDC', asset_issuer: 'test' },
     amount: '100',
     price: '0.12',
     total: '12',

@@ -12,6 +12,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+
 import { TransactionConfirmationModal } from "@/components/shared/TransactionConfirmationModal";
 import { usePairs } from "@/hooks/useApi";
 import { useQuoteRefresh } from "@/hooks/useQuoteRefresh";
@@ -55,6 +56,7 @@ export function DemoSwap() {
 
   const [selectedKey, setSelectedKey] = useState<string>("");
   const [sellRaw, setSellRaw] = useState<string>("");
+  const [slippage, setSlippage] = useState<number | null>(0.5);
 
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [txStatus, setTxStatus] = useState<TransactionStatus | "review">(
@@ -82,9 +84,9 @@ export function DemoSwap() {
 
   const sellMaxDecimals = selectedPair
     ? maxDecimalsForSellAsset(
-        selectedPair.base_asset,
-        selectedPair.base_decimals,
-      )
+      selectedPair.base_asset,
+      selectedPair.base_decimals,
+    )
     : maxDecimalsForSellAsset("native");
 
   const parseResult = parseSellAmount(sellRaw, sellMaxDecimals);
@@ -126,6 +128,12 @@ export function DemoSwap() {
       toast.error("Enter a valid sell amount and select a pair.");
       return;
     }
+
+    if (slippage === null || slippage < 0 || slippage > 50) {
+      toast.error("Enter a valid slippage tolerance between 0% and 50%.");
+      return;
+    }
+
     setTxStatus("review");
     setErrorMessage(undefined);
     setTxHash(undefined);
@@ -146,11 +154,14 @@ export function DemoSwap() {
           const fromAmt =
             parseResult.status === "ok" ? parseResult.normalized : "0";
           const toAmt = quote?.total ?? "10.5";
+          const resolvedPriceImpact =
+            quote?.priceImpact != null ? `${quote.priceImpact}%` : "—";
 
           if (isSuccess) {
             const mockHash = "mock_tx_" + Math.random().toString(36).substring(7);
             setTxHash(mockHash);
             setTxStatus("success");
+
             toast.success("Transaction Successful!", {
               description: `Swapped ${fromAmt} ${selectedPair?.base ?? ""} for ${toAmt} ${selectedPair?.counter ?? ""}`,
             });
@@ -163,7 +174,7 @@ export function DemoSwap() {
               toAsset: selectedPair?.counter ?? "USDC",
               toAmount: toAmt,
               exchangeRate: quote?.price ?? "0.105",
-              priceImpact: "0.1%",
+              priceImpact: resolvedPriceImpact,
               minReceived: toAmt,
               networkFee: "0.00001",
               routePath: quote?.path?.length ? quote.path : mockRoute,
@@ -176,6 +187,7 @@ export function DemoSwap() {
             setErrorMessage(
               "Insufficient balance or network congestion. Please try again.",
             );
+
             toast.error("Transaction Failed", {
               description: "Insufficient balance or network congestion.",
             });
@@ -188,7 +200,7 @@ export function DemoSwap() {
               toAsset: selectedPair?.counter ?? "USDC",
               toAmount: toAmt,
               exchangeRate: quote?.price ?? "0.105",
-              priceImpact: "0.1%",
+              priceImpact: resolvedPriceImpact,
               minReceived: toAmt,
               networkFee: "0.00001",
               routePath: quote?.path?.length ? quote.path : mockRoute,
@@ -209,11 +221,19 @@ export function DemoSwap() {
   const receivePreview =
     quote && parseResult.status === "ok" ? quote.total : "—";
 
+  const priceImpactDisplay =
+    quote?.priceImpact != null ? `${quote.priceImpact}%` : "—";
+
+  const slippageTooLow = slippage !== null && slippage < 0.1;
+  const slippageTooHigh = slippage !== null && slippage > 1;
+  const slippageOutOfBounds =
+    slippage !== null && (slippage < 0 || slippage > 50);
+
   return (
-    <Card className="p-6 max-w-lg mx-auto shadow-lg mt-8 border-primary/20 bg-background/50 backdrop-blur-sm">
+    <Card className="mx-auto mt-8 max-w-lg border-primary/20 bg-background/50 p-6 shadow-lg backdrop-blur-sm">
       <div className="space-y-4">
         <div>
-          <h2 className="text-xl font-bold mb-1">Swap Tokens</h2>
+          <h2 className="mb-1 text-xl font-bold">Swap Tokens</h2>
           <p className="text-sm text-muted-foreground">
             Demo swap with sell amount validation and debounced quotes
           </p>
@@ -266,6 +286,7 @@ export function DemoSwap() {
               Max
             </Button>
           </div>
+
           <Input
             inputMode="decimal"
             autoComplete="off"
@@ -275,6 +296,7 @@ export function DemoSwap() {
             onChange={(e: React.ChangeEvent<HTMLInputElement>) => setSellRaw(e.target.value)}
             className="text-lg font-medium"
           />
+
           <div className="min-h-[1.25rem] text-xs">
             {parseResult.status === "precision_exceeded" && (
               <span className="text-destructive">{parseResult.message}</span>
@@ -297,10 +319,10 @@ export function DemoSwap() {
           </div>
         </div>
 
-        <div className="space-y-4 bg-muted/20 p-4 rounded-lg border">
+        <div className="space-y-4 rounded-lg border bg-muted/20 p-4">
           <div>
             <span className="text-sm font-medium">Estimated receive</span>
-            <div className="text-2xl font-bold mt-1 text-success">
+            <div className="mt-1 text-2xl font-bold text-success">
               {quoteLoading && numericForQuote !== undefined ? (
                 <span className="flex items-center gap-2">
                   <Loader2 className="h-5 w-5 animate-spin" />
@@ -314,16 +336,91 @@ export function DemoSwap() {
               )}
             </div>
             {quoteError && numericForQuote !== undefined && (
-              <p className="text-xs text-destructive mt-1">
+              <p className="mt-1 text-xs text-destructive">
                 Quote failed: {quoteError.message}
               </p>
             )}
           </div>
+
           <div>
             <span className="text-sm font-medium text-muted-foreground">
               Reference price
             </span>
-            <div className="text-sm mt-1">{quote?.price ?? "—"}</div>
+            <div className="mt-1 text-sm">{quote?.price ?? "—"}</div>
+          </div>
+
+          <div className="flex justify-between text-sm">
+            <span>
+              Price impact{" "}
+              <span title="How much this trade moves the quoted market price">
+                ⓘ
+              </span>
+            </span>
+            <span>{priceImpactDisplay}</span>
+          </div>
+
+          <div className="space-y-2">
+            <span className="text-sm font-medium">Slippage tolerance</span>
+
+            <div className="flex gap-2">
+              {[0.1, 0.5, 1].map((preset) => (
+                <button
+                  key={preset}
+                  type="button"
+                  onClick={() => setSlippage(preset)}
+                  className={`rounded-md border px-3 py-1 text-sm ${slippage === preset ? "bg-primary text-primary-foreground" : ""
+                    }`}
+                >
+                  {preset}%
+                </button>
+              ))}
+            </div>
+
+            <div className="flex items-center gap-2">
+              <Input
+                type="number"
+                min={0}
+                max={50}
+                step="0.1"
+                value={slippage ?? ""}
+                onChange={(e) => {
+                  const raw = e.target.value;
+                  if (raw === "") {
+                    setSlippage(null);
+                    return;
+                  }
+
+                  const val = Number(raw);
+                  if (Number.isNaN(val)) {
+                    setSlippage(null);
+                    return;
+                  }
+
+                  setSlippage(val);
+                }}
+                placeholder="Custom %"
+                className="w-24"
+              />
+              <span className="text-sm">%</span>
+            </div>
+
+            {slippageOutOfBounds && (
+              <p className="text-xs text-destructive">
+                Enter a slippage value between 0% and 50%.
+              </p>
+            )}
+
+            {!slippageOutOfBounds && slippageTooLow && (
+              <p className="text-xs text-yellow-500">
+                Very low slippage may cause the swap to fail.
+              </p>
+            )}
+
+            {!slippageOutOfBounds && slippageTooHigh && (
+              <p className="text-xs text-yellow-500">
+                High slippage increases the risk of receiving a worse price.
+              </p>
+            )}
           </div>
 
           <div className="flex flex-wrap items-center gap-3">
@@ -356,9 +453,14 @@ export function DemoSwap() {
         </div>
 
         <Button
-          className="w-full text-lg h-12"
+          className="h-12 w-full text-lg"
           onClick={handleSwapClick}
-          disabled={!selectedPair || parseResult.status !== "ok"}
+          disabled={
+            !selectedPair ||
+            parseResult.status !== "ok" ||
+            slippage === null ||
+            slippageOutOfBounds
+          }
         >
           Review Swap
         </Button>

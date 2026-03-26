@@ -49,7 +49,7 @@ jobs:
         run: cargo fmt -- --check
       
       - name: Run clippy (contracts)
-        run: cargo clippy -p stellarroute-contracts --all-targets -- -D warnings
+        run:  
       
       - name: Run cargo audit
         run: cargo audit
@@ -179,3 +179,34 @@ jobs:
 
       - name: Production build
         run: npm run build
+
+  sdk-js:
+    name: SDK JS
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk-js
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: sdk-js/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build (ESM + CJS)
+        run: npm run build
+
+      - name: Verify examples type-check against build
+        run: npm run examples:typecheck

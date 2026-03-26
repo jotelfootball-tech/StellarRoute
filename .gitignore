@@ -39,6 +39,12 @@ build/
 *.wasm
 *.wasm.gz
 
+# Node
+node_modules/
+.npm/
+frontend/node_modules/
+sdk-js/node_modules/
+
 # Test coverage
 tarpaulin-report.html
 coverage/
@@ -58,6 +64,7 @@ requirements.md
 task_plan.md
 findings.md
 progress.md
+GEMINI.md
 .claude/
 .claude/skills/
 .claude/skills/planning-with-files/
@@ -72,3 +79,4 @@ GITHUB_ISSUES.md
 
 issue.md
 commit.md
+

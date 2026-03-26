@@ -143,6 +143,12 @@ pub struct QuoteResponse {
     /// Time-to-live in seconds for client-side staleness detection
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ttl_seconds: Option<u32>,
+    /// Rationale for quote venue selection
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rationale: Option<QuoteRationaleMetadata>,
+    /// Venues excluded from routing and the reason for each exclusion
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exclusion_diagnostics: Option<ExclusionDiagnostics>,
 }
 
 /// Configuration for quote staleness detection
@@ -170,20 +176,20 @@ impl QuoteResponse {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as i64;
-        
+
         let age_ms = now - self.timestamp;
         let max_age_ms = config.max_age_seconds as i64 * 1000;
-        
+
         age_ms > max_age_ms
     }
-    
+
     /// Create a quote response with expiry metadata
     pub fn with_expiry(mut self, ttl_seconds: u32) -> Self {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as i64;
-        
+
         self.expires_at = Some(now + (ttl_seconds as i64 * 1000));
         self.ttl_seconds = Some(ttl_seconds);
         self
@@ -214,6 +220,33 @@ pub struct PathStep {
     pub to_asset: AssetInfo,
     pub price: String,
     pub source: String, // "sdex" or "amm:{pool_address}"
+}
+
+// ---------------------------------------------------------------------------
+// Exclusion diagnostics (local API types — routing types lack ToSchema)
+// ---------------------------------------------------------------------------
+
+/// Diagnostics about venues excluded from routing
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ExclusionDiagnostics {
+    pub excluded_venues: Vec<ExcludedVenueInfo>,
+}
+
+/// Details about a single excluded venue
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ExcludedVenueInfo {
+    pub venue_ref: String,
+    pub score: f64,
+    pub signals: serde_json::Value,
+    pub reason: ExclusionReason,
+}
+
+/// Reason a venue was excluded from routing
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum ExclusionReason {
+    PolicyThreshold { threshold: f64 },
+    Override,
 }
 
 /// Error response

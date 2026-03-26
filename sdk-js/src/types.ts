@@ -1,55 +1,107 @@
+/**
+ * Stellar asset descriptor returned by the API.
+ */
 export interface Asset {
+  /** Stellar asset type. */
   asset_type: 'native' | 'credit_alphanum4' | 'credit_alphanum12';
+  /** Asset code, e.g. `"USDC"`. Absent for native XLM. */
   asset_code?: string;
+  /** G-address of the issuing account. Absent for native XLM. */
   asset_issuer?: string;
 }
 
+/**
+ * A single tradeable asset pair with active orderbook depth.
+ */
 export interface TradingPair {
+  /** Human-readable base asset code, e.g. `"XLM"`. */
   base: string;
+  /** Human-readable counter asset code, e.g. `"USDC"`. */
   counter: string;
+  /** Canonical base asset identifier (`"native"` or `"CODE:ISSUER"`). */
   base_asset: string;
+  /** Canonical counter asset identifier. */
   counter_asset: string;
+  /** Number of active offers for this pair. */
   offer_count: number;
+  /** RFC-3339 timestamp of the most recent offer update. */
   last_updated?: string;
 }
 
+/**
+ * Response from `GET /api/v1/pairs`.
+ */
 export interface PairsResponse {
+  /** Active trading pairs ordered by liquidity depth. */
   pairs: TradingPair[];
+  /** Total number of pairs returned. */
   total: number;
 }
 
+/**
+ * A single price level in the orderbook.
+ */
 export interface OrderbookEntry {
+  /** Price as a decimal string (7 decimal places). */
   price: string;
+  /** Available amount at this price level. */
   amount: string;
+  /** Total value at this price level (`price × amount`). */
   total: string;
 }
 
+/**
+ * Full orderbook snapshot for a trading pair.
+ * Response from `GET /api/v1/orderbook/{base}/{quote}`.
+ */
 export interface Orderbook {
   base_asset: Asset;
   quote_asset: Asset;
+  /** Buy orders sorted highest price first. */
   bids: OrderbookEntry[];
+  /** Sell orders sorted lowest price first. */
   asks: OrderbookEntry[];
+  /** Unix timestamp of the snapshot. */
   timestamp: number;
 }
 
+/**
+ * Direction of a price quote.
+ * - `"sell"` — how much quote asset you receive when selling `amount` of the base asset.
+ * - `"buy"`  — how much base asset you must spend to buy `amount` of the quote asset.
+ */
 export type QuoteType = 'sell' | 'buy';
 
+/**
+ * A single hop in the optimal execution path.
+ */
 export interface PathStep {
   from_asset: Asset;
   to_asset: Asset;
+  /** Exchange rate for this hop. */
   price: string;
+  /** Liquidity source: `"sdex"` or `"amm:<pool_address>"`. */
   source: string;
 }
 
+/**
+ * Best available price quote with full routing path.
+ * Response from `GET /api/v1/quote/{base}/{quote}`.
+ */
 export interface PriceQuote {
   base_asset: Asset;
   quote_asset: Asset;
+  /** Input amount that was quoted. */
   amount: string;
+  /** Effective price (quote asset per base asset unit). */
   price: string;
+  /** Total output amount (`amount × price`). */
   total: string;
+  /** Direction of the quote. */
   quote_type: QuoteType;
+  /** Ordered list of hops in the optimal execution path. */
   path: PathStep[];
-  /** Unix timestamp (ms) when this quote was generated */
+  /** Unix timestamp when the quote was generated. */
   timestamp: number;
   /** Unix timestamp (ms) when this quote expires and should be considered stale */
   expires_at?: number;
@@ -104,15 +156,42 @@ export function getTimeUntilExpiry(quote: PriceQuote): number | null {
   return remaining > 0 ? Math.floor(remaining / 1000) : 0;
 }
 
+/**
+ * Service health check result.
+ * Response from `GET /health`.
+ */
 export interface HealthStatus {
+  /** Overall service status. */
   status: 'healthy' | 'unhealthy';
+  /** Deployed package version string. */
   version: string;
+  /** ISO-8601 UTC timestamp of the health check. */
   timestamp: string;
+  /** Per-dependency health map, e.g. `{ database: "healthy" }`. */
   components: Record<string, string>;
 }
 
+/**
+ * Wire format of the API error body.
+ */
 export interface ApiError {
+  /** Machine-readable error code, e.g. `"not_found"`. */
   error: string;
+  /** Human-readable description. */
   message: string;
+  /** Optional structured context (present on validation errors). */
   details?: unknown;
 }
+
+/**
+ * Machine-readable error codes returned by the StellarRoute API.
+ */
+export type ApiErrorCode =
+  | 'invalid_asset'
+  | 'validation_error'
+  | 'not_found'
+  | 'rate_limit_exceeded'
+  | 'internal_error'
+  | 'network_error'
+  | 'unknown_error'
+  | (string & Record<never, never>); // allow unknown codes without losing autocomplete
