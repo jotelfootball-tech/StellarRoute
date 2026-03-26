@@ -2,6 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Loader2, RefreshCw } from "lucide-react";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -431,8 +432,7 @@ export function DemoSwap() {
               </p>
             )}
           </div>
-        </div>
-        
+
         {numericForQuote && (
           <TradeRouteDisplay 
             quote={quote || null} 

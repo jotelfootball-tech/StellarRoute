@@ -18,7 +18,8 @@ export function SwapWithPairSelector() {
   const { base, quote, setPair, isInitializing } = useTokenPairUrl();
   const [amount, setAmount] = useState("");
 
-  const pairs = useMemo(() => pairsData?.pairs || [], [pairsData]);
+  // `usePairs()` returns `TradingPair[]` directly (not `{ pairs: ... }`)
+  const pairs = useMemo(() => pairsData ?? [], [pairsData]);
 
   // Auto-select first pair if none selected
   useEffect(() => {

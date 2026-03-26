@@ -7,6 +7,7 @@ import { QuoteSummary } from './QuoteSummary';
 import { RouteDisplay } from './RouteDisplay';
 import { SlippageControl } from './SlippageControl';
 import { SwapCTA } from './SwapCTA';
+import { SimulationPanel } from './SimulationPanel';
 
 export function SwapCard() {
   // Mock states for the demo

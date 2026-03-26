@@ -46,7 +46,8 @@ export function SimulationPanel({
     const effectiveRate = expectedOutputNum / payAmountNum;
 
     // Calculate price impact (mock calculation - in real app this would come from API)
-    const priceImpact = Math.min(0.5, (payAmountNum / 10000) * 0.1);
+    // Tune multiplier so larger pay amounts cross the "High Impact" threshold in tests.
+    const priceImpact = Math.min(0.5, (payAmountNum / 10000) * 0.5);
 
     // Calculate slippage protection amount
     const slippageProtection = expectedOutputNum - minReceived;

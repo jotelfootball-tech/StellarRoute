@@ -31,3 +31,22 @@ export const Wallet = Icon;
 export const X = Icon;
 export const XCircle = Icon;
 export const XIcon = Icon;
+
+// Additional icons referenced by components/tests
+export const ArrowLeftRight = Icon;
+export const Copy = Icon;
+export const Search = Icon;
+
+export const AlertTriangle = Icon;
+export const TrendingDown = Icon;
+export const TrendingUp = Icon;
+
+export const TriangleAlert = Icon;
+export const AlertCircle = Icon;
+
+// Sonner "Toaster" icon set
+export const CircleCheckIcon = Icon;
+export const InfoIcon = Icon;
+export const Loader2Icon = Icon;
+export const OctagonXIcon = Icon;
+export const TriangleAlertIcon = Icon;

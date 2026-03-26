@@ -1,8 +1,11 @@
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { cleanup } from "@testing-library/react";
+import { afterEach, describe, expect, it } from "vitest";
 import { SimulationPanel } from "./SimulationPanel";
 
 describe("SimulationPanel", () => {
+  afterEach(() => cleanup());
+
   it("should show empty state when no amount is entered", () => {
     render(
       <SimulationPanel
