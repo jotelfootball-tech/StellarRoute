@@ -24,6 +24,7 @@ export const Loader2 = Icon;
 export const Menu = Icon;
 export const Moon = Icon;
 export const RefreshCw = Icon;
+export const RotateCcw = Icon;
 export const Settings = Icon;
 export const Sun = Icon;
 export const Trash2 = Icon;
