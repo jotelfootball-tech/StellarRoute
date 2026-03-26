@@ -2,7 +2,9 @@
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::time::Duration;
-use stellarroute_routing::{HybridOptimizer, LiquidityEdge, PathfinderConfig, PolicyPresets};
+use stellarroute_routing::{
+    HybridOptimizer, LiquidityEdge, PathfinderConfig, PolicyPresets, RoutingPolicy,
+};
 
 fn create_test_edges() -> Vec<LiquidityEdge> {
     vec![
@@ -73,6 +75,7 @@ fn bench_policy_comparison(c: &mut Criterion) {
                         black_box(to),
                         black_box(&edges),
                         black_box(amount),
+                        black_box(&RoutingPolicy::default()),
                     ))
                 })
             },
@@ -107,6 +110,7 @@ fn bench_latency_vs_quality(c: &mut Criterion) {
                         black_box(to),
                         black_box(&edges),
                         black_box(amount),
+                        black_box(&RoutingPolicy::default()),
                     ))
                 })
             },
@@ -136,6 +140,7 @@ fn bench_scalability(c: &mut Criterion) {
         }
 
         let optimizer = HybridOptimizer::new(PathfinderConfig::default());
+        let routing_policy = RoutingPolicy::default();
 
         group.bench_with_input(
             BenchmarkId::new("graph_size", edge_count),
@@ -147,6 +152,7 @@ fn bench_scalability(c: &mut Criterion) {
                         black_box(to),
                         black_box(&edges),
                         black_box(amount),
+                        black_box(&routing_policy),
                     ))
                 })
             },
@@ -159,6 +165,7 @@ fn bench_scalability(c: &mut Criterion) {
 fn bench_determinism(c: &mut Criterion) {
     let edges = create_test_edges();
     let optimizer = HybridOptimizer::new(PathfinderConfig::default());
+    let routing_policy = RoutingPolicy::default();
 
     let mut group = c.benchmark_group("determinism");
     group.measurement_time(Duration::from_secs(5));
@@ -171,6 +178,7 @@ fn bench_determinism(c: &mut Criterion) {
                 black_box("BTC"),
                 black_box(&edges),
                 black_box(100_000_000),
+                black_box(&routing_policy),
             ));
 
             let result2 = black_box(optimizer.find_optimal_routes(
@@ -178,6 +186,7 @@ fn bench_determinism(c: &mut Criterion) {
                 black_box("BTC"),
                 black_box(&edges),
                 black_box(100_000_000),
+                black_box(&routing_policy),
             ));
 
             // Results should be identical for deterministic behavior
@@ -194,6 +203,7 @@ fn bench_determinism(c: &mut Criterion) {
 fn bench_benchmark_policies(c: &mut Criterion) {
     let edges = create_test_edges();
     let mut optimizer = HybridOptimizer::new(PathfinderConfig::default());
+    let routing_policy = RoutingPolicy::default();
 
     let mut group = c.benchmark_group("benchmark_policies");
     group.measurement_time(Duration::from_secs(10));
@@ -205,6 +215,7 @@ fn bench_benchmark_policies(c: &mut Criterion) {
                 black_box("BTC"),
                 black_box(&edges),
                 black_box(100_000_000),
+                black_box(&routing_policy),
             ))
         })
     });

@@ -69,8 +69,7 @@ impl RoutingPolicy {
     /// 2. The venue must **not** be in the denylist.
     pub fn is_venue_allowed(&self, venue_type: &str) -> bool {
         // Allowlist check: if non-empty, venue must be in it
-        if !self.venue_allowlist.is_empty()
-            && !self.venue_allowlist.iter().any(|v| v == venue_type)
+        if !self.venue_allowlist.is_empty() && !self.venue_allowlist.iter().any(|v| v == venue_type)
         {
             return false;
         }
@@ -91,13 +90,11 @@ impl RoutingPolicy {
             .and_then(|v| v.parse().ok())
             .unwrap_or(4);
 
-        let venue_allowlist = parse_comma_list(
-            &std::env::var("ROUTING_VENUE_ALLOWLIST").unwrap_or_default(),
-        );
+        let venue_allowlist =
+            parse_comma_list(&std::env::var("ROUTING_VENUE_ALLOWLIST").unwrap_or_default());
 
-        let venue_denylist = parse_comma_list(
-            &std::env::var("ROUTING_VENUE_DENYLIST").unwrap_or_default(),
-        );
+        let venue_denylist =
+            parse_comma_list(&std::env::var("ROUTING_VENUE_DENYLIST").unwrap_or_default());
 
         Self {
             max_hops,
@@ -119,8 +116,7 @@ impl RoutingPolicy {
         if !self.venue_allowlist.is_empty() && !self.venue_denylist.is_empty() {
             let allow_set: HashSet<&str> =
                 self.venue_allowlist.iter().map(|s| s.as_str()).collect();
-            let deny_set: HashSet<&str> =
-                self.venue_denylist.iter().map(|s| s.as_str()).collect();
+            let deny_set: HashSet<&str> = self.venue_denylist.iter().map(|s| s.as_str()).collect();
             let overlap: Vec<&&str> = allow_set.intersection(&deny_set).collect();
             if !overlap.is_empty() {
                 return Err(format!(
@@ -159,8 +155,7 @@ mod tests {
 
     #[test]
     fn allowlist_restricts_to_listed_types() {
-        let policy = RoutingPolicy::default()
-            .with_venue_allowlist(vec!["amm".to_string()]);
+        let policy = RoutingPolicy::default().with_venue_allowlist(vec!["amm".to_string()]);
         assert!(policy.is_venue_allowed("amm"));
         assert!(!policy.is_venue_allowed("sdex"));
         assert!(!policy.is_venue_allowed("orderbook"));
@@ -168,8 +163,7 @@ mod tests {
 
     #[test]
     fn denylist_excludes_listed_types() {
-        let policy = RoutingPolicy::default()
-            .with_venue_denylist(vec!["orderbook".to_string()]);
+        let policy = RoutingPolicy::default().with_venue_denylist(vec!["orderbook".to_string()]);
         assert!(policy.is_venue_allowed("amm"));
         assert!(policy.is_venue_allowed("sdex"));
         assert!(!policy.is_venue_allowed("orderbook"));

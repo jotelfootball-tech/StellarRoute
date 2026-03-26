@@ -144,12 +144,10 @@ async fn get_quote_inner(
         ));
     }
 
-    let slippage_bps = params.slippage_bps.unwrap_or(50);
-    if slippage_bps > 10_000 {
-        return Err(ApiError::Validation(
-            "slippage_bps must be between 0 and 10000".to_string(),
-        ));
-    }
+    // Validate slippage bounds
+    params.validate_slippage().map_err(ApiError::Validation)?;
+
+    let slippage_bps = params.slippage_bps();
     let quote_type = match params.quote_type {
         crate::models::request::QuoteType::Sell => "sell",
         crate::models::request::QuoteType::Buy => "buy",
@@ -172,51 +170,149 @@ async fn get_quote_inner(
                 return Ok(Json(cached));
             }
 
-            state.cache_metrics.inc_quote_miss();
-        }
+            // For now, implement simple direct path (SDEX only)
+            // TODO: Implement multi-hop routing in Phase 2
+            let compute_res =
+                find_best_price(&state, &base_asset, &quote_asset, base_id, quote_id, amount).await;
+
+            let (price, path, rationale, api_diagnostics, freshness_outcome, fresh_timestamps) =
+                match compute_res {
+                    Ok(res) => res,
+                    Err(e) => return Arc::new(Err(e)),
+                };
+
+            // Req 4.2: increment stale_inputs_excluded counter when stale inputs were excluded
+            let stale_count = freshness_outcome.stale.len();
+            if stale_count > 0 {
+                state
+                    .cache_metrics
+                    .add_stale_inputs_excluded(stale_count as u64);
+            }
+
+            let total = amount * price;
+            // Keep timestamps in milliseconds to match API docs and frontend staleness logic.
+            let timestamp = chrono::Utc::now().timestamp_millis();
+            let ttl_seconds = u32::try_from(state.cache_policy.quote_ttl.as_secs()).ok();
+            let expires_at = i64::try_from(state.cache_policy.quote_ttl.as_millis())
+                .ok()
+                .map(|ttl_ms| timestamp + ttl_ms);
+
+            // Req 3.1: source_timestamp = oldest last_updated_at among fresh candidates (Unix ms)
+            let source_timestamp = fresh_timestamps
+                .iter()
+                .min()
+                .map(|ts| ts.timestamp_millis());
+
+            // Req 3.2, 3.3: data_freshness populated from FreshnessOutcome
+            let data_freshness = Some(crate::models::DataFreshness {
+                fresh_count: freshness_outcome.fresh.len(),
+                stale_count: freshness_outcome.stale.len(),
+                max_staleness_secs: freshness_outcome.max_staleness_secs,
+            });
+
+            let response = QuoteResponse {
+                base_asset: asset_path_to_info(&base_asset),
+                quote_asset: asset_path_to_info(&quote_asset),
+                amount: format!("{:.7}", amount),
+                price: format!("{:.7}", price),
+                total: format!("{:.7}", total),
+                quote_type: quote_type.to_string(),
+                path,
+                timestamp,
+                expires_at,
+                source_timestamp,
+                ttl_seconds,
+                rationale: Some(rationale),
+                exclusion_diagnostics: Some(api_diagnostics),
+                data_freshness,
+            };
+
+            // Cache the response (TTL: 2 seconds for quote data)
+            if let Some(cache) = &state.cache {
+                if let Ok(mut cache) = cache.try_lock() {
+                    let _ = cache
+                        .set(&quote_cache_key, &response, state.cache_policy.quote_ttl)
+                        .await;
+                }
+            }
+
+            Arc::new(Ok(response))
+        })
+        .await;
+
+    match Arc::try_unwrap(result_arc) {
+        Ok(res) => res.map(Json),
+        Err(arc_res) => (*arc_res).clone().map(Json),
+    }
+}
+
+/// Get routing path for a trading pair
+///
+/// Returns only the optimal execution path without detailed pricing
+#[utoipa::path(
+    get,
+    path = "/api/v1/route/{base}/{quote}",
+    tag = "trading",
+    params(
+        ("base" = String, Path, description = "Base asset (e.g., 'native', 'USDC', or 'USDC:ISSUER')"),
+        ("quote" = String, Path, description = "Quote asset (e.g., 'native', 'USDC', or 'USDC:ISSUER')"),
+        ("amount" = Option<String>, Query, description = "Amount to trade (default: 1)"),
+        ("slippage_bps" = Option<u32>, Query, description = "Slippage tolerance in basis points (default: 50)"),
+        ("quote_type" = Option<String>, Query, description = "Type of quote: 'sell' or 'buy' (default: sell)"),
+    ),
+    responses(
+        (status = 200, description = "Trading route", body = RouteResponse),
+        (status = 400, description = "Invalid parameters", body = ErrorResponse),
+        (status = 404, description = "No route found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    )
+)]
+pub async fn get_route(
+    State(state): State<Arc<AppState>>,
+    Path((base, quote)): Path<(String, String)>,
+    Query(params): Query<QuoteParams>,
+) -> Result<Json<crate::models::RouteResponse>> {
+    debug!(
+        "Getting route for {}/{} with params: {:?}",
+        base, quote, params
+    );
+
+    // Parse asset identifiers
+    let base_asset = AssetPath::parse(&base)
+        .map_err(|e| ApiError::InvalidAsset(format!("Invalid base asset: {}", e)))?;
+    let quote_asset = AssetPath::parse(&quote)
+        .map_err(|e| ApiError::InvalidAsset(format!("Invalid quote asset: {}", e)))?;
+
+    // Parse amount (default to 1)
+    let amount: f64 = params
+        .amount
+        .as_deref()
+        .unwrap_or("1")
+        .parse()
+        .map_err(|_| ApiError::Validation("Invalid amount".to_string()))?;
+
+    if amount <= 0.0 {
+        return Err(ApiError::Validation(
+            "Amount must be greater than zero".to_string(),
+        ));
     }
 
-    // For now, implement simple direct path (SDEX only)
-    // TODO: Implement multi-hop routing in Phase 2
-    let (price, path, rationale, api_diagnostics, freshness_outcome, fresh_timestamps) =
+    // Validate slippage bounds
+    params.validate_slippage().map_err(ApiError::Validation)?;
+
+    let slippage_bps = params.slippage_bps();
+
+    let base_id = find_asset_id(&state, &base_asset).await?;
+    let quote_id = find_asset_id(&state, &quote_asset).await?;
+
+    // For route endpoint, we reuse the same logic but return a simplified response
+    let (_, path, _, _, _, _) =
         find_best_price(&state, &base_asset, &quote_asset, base_id, quote_id, amount).await?;
 
-    // Req 4.2: increment stale_inputs_excluded counter when stale inputs were excluded
-    let stale_count = freshness_outcome.stale.len();
-    if stale_count > 0 {
-        state
-            .cache_metrics
-            .add_stale_inputs_excluded(stale_count as u64);
-    }
-
-    let total = amount * price;
-    // Keep timestamps in milliseconds to match API docs and frontend staleness logic.
-    let timestamp = chrono::Utc::now().timestamp_millis();
-    let ttl_seconds = u32::try_from(state.cache_policy.quote_ttl.as_secs()).ok();
-    let expires_at = i64::try_from(state.cache_policy.quote_ttl.as_millis())
-        .ok()
-        .map(|ttl_ms| timestamp + ttl_ms);
-
-    // Req 3.1: source_timestamp = oldest last_updated_at among fresh candidates (Unix ms)
-    let source_timestamp = fresh_timestamps
-        .iter()
-        .min()
-        .map(|ts| ts.timestamp_millis());
-
-    // Req 3.2, 3.3: data_freshness populated from FreshnessOutcome
-    let data_freshness = Some(crate::models::DataFreshness {
-        fresh_count: freshness_outcome.fresh.len(),
-        stale_count: freshness_outcome.stale.len(),
-        max_staleness_secs: freshness_outcome.max_staleness_secs,
-    });
-
-    let response = QuoteResponse {
+    let response = crate::models::RouteResponse {
         base_asset: asset_path_to_info(&base_asset),
         quote_asset: asset_path_to_info(&quote_asset),
         amount: format!("{:.7}", amount),
-        price: format!("{:.7}", price),
-        total: format!("{:.7}", total),
-        quote_type: quote_type.to_string(),
         path,
         timestamp,
         expires_at,
@@ -226,15 +322,6 @@ async fn get_quote_inner(
         exclusion_diagnostics: if explain { Some(api_diagnostics) } else { None },
         data_freshness,
     };
-
-    // Cache the response (TTL: 2 seconds for quote data)
-    if let Some(cache) = &state.cache {
-        if let Ok(mut cache) = cache.try_lock() {
-            let _ = cache
-                .set(&quote_cache_key, &response, state.cache_policy.quote_ttl)
-                .await;
-        }
-    }
 
     Ok(Json(response))
 }

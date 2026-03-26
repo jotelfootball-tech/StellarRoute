@@ -7,6 +7,7 @@ import type {
   PriceQuote,
   QuoteStalenessConfig,
   QuoteType,
+  RouteResponse,
 } from './types.js';
 import { DEFAULT_STALENESS_CONFIG, isQuoteStale, isQuoteExpired } from './types.js';
 
@@ -186,6 +187,7 @@ export class StellarRouteClient {
    * @param quote  Quote asset identifier.
    * @param amount Amount of the base asset to trade. Defaults to `1`.
    * @param type   Direction of the quote (`"sell"` or `"buy"`). Defaults to `"sell"`.
+   * @param slippage Slippage tolerance in basis points (e.g. 50 = 0.5%).
    *
    * @throws {@link StellarRouteApiError} with `status === 404` when no route exists.
    * @throws {@link StellarRouteApiError} with `status === 400` for invalid params.
@@ -195,10 +197,12 @@ export class StellarRouteClient {
     quote: string,
     amount?: number,
     type: QuoteType = 'sell',
+    slippage?: number,
     signal?: AbortSignal,
   ): Promise<PriceQuote> {
     const params = new URLSearchParams({ quote_type: type });
     if (amount !== undefined) params.set('amount', String(amount));
+    if (slippage !== undefined) params.set('slippage_bps', String(slippage));
     const path = `/api/v1/quote/${encodeURIComponent(base)}/${encodeURIComponent(quote)}?${params}`;
     return this.request<PriceQuote>(path, signal);
   }
@@ -213,10 +217,11 @@ export class StellarRouteClient {
     quote: string,
     amount?: number,
     type: QuoteType = 'sell',
+    slippage?: number,
     stalenessConfig: QuoteStalenessConfig = DEFAULT_STALENESS_CONFIG,
     signal?: AbortSignal,
   ): Promise<PriceQuote> {
-    const quoteResponse = await this.getQuote(base, quote, amount, type, signal);
+    const quoteResponse = await this.getQuote(base, quote, amount, type, slippage, signal);
 
     if (isQuoteExpired(quoteResponse)) {
       throw new StellarRouteApiError(
@@ -240,17 +245,31 @@ export class StellarRouteClient {
   }
 
   /**
-   * Convenience wrapper around {@link getQuote} that returns only the routing
-   * path steps.
+   * `GET /api/v1/route/{base}/{quote}` — get optimal trading route.
+   *
+   * @param base   Base asset identifier.
+   * @param quote  Quote asset identifier.
+   * @param amount Amount of the base asset to trade.
+   * @param type   Direction of the quote (`"sell"` or `"buy"`).
+   * @param slippage Slippage tolerance in basis points.
+   *
+   * @throws {@link StellarRouteApiError} with `status === 404` when no route exists.
    */
-  async getRoutes(    base: string,
+  async getRoutes(
+    base: string,
     quote: string,
     amount?: number,
     type: QuoteType = 'sell',
+    slippage?: number,
     signal?: AbortSignal,
   ): Promise<PathStep[]> {
-    const quoteResponse = await this.getQuote(base, quote, amount, type, signal);
-    return quoteResponse.path;
+    const params = new URLSearchParams({ quote_type: type });
+    if (amount !== undefined) params.set('amount', String(amount));
+    if (slippage !== undefined) params.set('slippage_bps', String(slippage));
+
+    const path = `/api/v1/route/${encodeURIComponent(base)}/${encodeURIComponent(quote)}?${params}`;
+    const response = await this.request<RouteResponse>(path, signal);
+    return response.path;
   }
 
   // ── Internal helpers ────────────────────────────────────────────────────────

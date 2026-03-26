@@ -208,7 +208,9 @@ impl HybridOptimizer {
         let policy = self.active_policy();
 
         // Find all possible paths
-        let paths = self.pathfinder.find_paths(from, to, edges, amount_in, routing_policy)?;
+        let paths = self
+            .pathfinder
+            .find_paths(from, to, edges, amount_in, routing_policy)?;
 
         if paths.is_empty() {
             return Err(RoutingError::NoRoute(from.to_string(), to.to_string()));
@@ -334,7 +336,8 @@ impl HybridOptimizer {
 
         for env_name in policy_names {
             self.set_active_policy(&env_name)?;
-            let diagnostics = self.find_optimal_routes(from, to, edges, amount_in, routing_policy)?;
+            let diagnostics =
+                self.find_optimal_routes(from, to, edges, amount_in, routing_policy)?;
             results.push((env_name.clone(), diagnostics));
         }
 

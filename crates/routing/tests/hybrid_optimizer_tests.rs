@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use stellarroute_routing::{
-    HybridOptimizer, LiquidityEdge, OptimizerPolicy, PathfinderConfig, PolicyPresets,
+    HybridOptimizer, LiquidityEdge, OptimizerPolicy, PathfinderConfig, PolicyPresets, RoutingPolicy,
 };
 
 fn create_test_graph() -> Vec<LiquidityEdge> {
@@ -55,6 +55,10 @@ fn create_test_graph() -> Vec<LiquidityEdge> {
     ]
 }
 
+fn default_routing_policy() -> RoutingPolicy {
+    RoutingPolicy::default()
+}
+
 #[test]
 fn test_hybrid_optimizer_basic_functionality() {
     let edges = create_test_graph();
@@ -65,6 +69,7 @@ fn test_hybrid_optimizer_basic_functionality() {
         "BTC",
         &edges,
         100_000_000, // 10 XLM
+        &default_routing_policy(),
     );
 
     assert!(result.is_ok());
@@ -96,7 +101,7 @@ fn test_policy_comparison() {
         optimizer.set_active_policy(name).unwrap();
 
         let result = optimizer
-            .find_optimal_routes("XLM", "BTC", &edges, 100_000_000)
+            .find_optimal_routes("XLM", "BTC", &edges, 100_000_000, &default_routing_policy())
             .unwrap();
         results.insert(name, result.metrics.clone());
     }
@@ -119,13 +124,13 @@ fn test_deterministic_behavior() {
 
     // Run same query multiple times
     let result1 = optimizer
-        .find_optimal_routes("XLM", "BTC", &edges, 100_000_000)
+        .find_optimal_routes("XLM", "BTC", &edges, 100_000_000, &default_routing_policy())
         .unwrap();
     let result2 = optimizer
-        .find_optimal_routes("XLM", "BTC", &edges, 100_000_000)
+        .find_optimal_routes("XLM", "BTC", &edges, 100_000_000, &default_routing_policy())
         .unwrap();
     let result3 = optimizer
-        .find_optimal_routes("XLM", "BTC", &edges, 100_000_000)
+        .find_optimal_routes("XLM", "BTC", &edges, 100_000_000, &default_routing_policy())
         .unwrap();
 
     // Results should be identical
@@ -155,7 +160,8 @@ fn test_policy_constraints() {
     optimizer.add_policy(restrictive_policy).unwrap();
     optimizer.set_active_policy("restrictive").unwrap();
 
-    let result = optimizer.find_optimal_routes("XLM", "BTC", &edges, 100_000_000);
+    let result =
+        optimizer.find_optimal_routes("XLM", "BTC", &edges, 100_000_000, &default_routing_policy());
 
     // Should either succeed with constrained route or fail gracefully
     match result {
@@ -187,7 +193,7 @@ fn test_custom_policy() {
     optimizer.set_active_policy("latency_first").unwrap();
 
     let result = optimizer
-        .find_optimal_routes("XLM", "BTC", &edges, 100_000_000)
+        .find_optimal_routes("XLM", "BTC", &edges, 100_000_000, &default_routing_policy())
         .unwrap();
 
     // Should find a route quickly
@@ -201,7 +207,7 @@ fn test_benchmark_all_policies() {
     let mut optimizer = HybridOptimizer::new(PathfinderConfig::default());
 
     let results = optimizer
-        .benchmark_policies("XLM", "BTC", &edges, 100_000_000)
+        .benchmark_policies("XLM", "BTC", &edges, 100_000_000, &default_routing_policy())
         .unwrap();
 
     // Should have results for all default policies
@@ -221,7 +227,7 @@ fn test_route_quality_metrics() {
     let optimizer = HybridOptimizer::new(PathfinderConfig::default());
 
     let result = optimizer
-        .find_optimal_routes("XLM", "BTC", &edges, 100_000_000)
+        .find_optimal_routes("XLM", "BTC", &edges, 100_000_000, &default_routing_policy())
         .unwrap();
     let metrics = result.metrics;
 
@@ -243,7 +249,13 @@ fn test_no_route_available() {
     let optimizer = HybridOptimizer::new(PathfinderConfig::default());
 
     // Request route to non-existent asset
-    let result = optimizer.find_optimal_routes("XLM", "NONEXISTENT", &edges, 100_000_000);
+    let result = optimizer.find_optimal_routes(
+        "XLM",
+        "NONEXISTENT",
+        &edges,
+        100_000_000,
+        &default_routing_policy(),
+    );
 
     assert!(result.is_err());
 }
@@ -259,7 +271,13 @@ fn test_insufficient_liquidity() {
 
     let optimizer = HybridOptimizer::new(PathfinderConfig::default());
 
-    let result = optimizer.find_optimal_routes("XLM", "BTC", &small_edges, 100_000_000); // Large amount
+    let result = optimizer.find_optimal_routes(
+        "XLM",
+        "BTC",
+        &small_edges,
+        100_000_000,
+        &default_routing_policy(),
+    ); // Large amount
 
     // Should fail due to insufficient liquidity
     assert!(result.is_err());
@@ -272,12 +290,12 @@ fn test_multi_hop_vs_direct() {
 
     // Test direct XLM -> BTC route
     let direct_result = optimizer
-        .find_optimal_routes("XLM", "BTC", &edges, 50_000_000)
+        .find_optimal_routes("XLM", "BTC", &edges, 50_000_000, &default_routing_policy())
         .unwrap();
 
     // Test multi-hop XLM -> USDC -> BTC route
     let multihop_result = optimizer
-        .find_optimal_routes("XLM", "BTC", &edges, 50_000_000)
+        .find_optimal_routes("XLM", "BTC", &edges, 50_000_000, &default_routing_policy())
         .unwrap();
 
     // Both should find routes, but potentially different ones

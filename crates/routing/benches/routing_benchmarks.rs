@@ -1,17 +1,17 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use stellarroute_routing::{
     pathfinder::{LiquidityEdge, Pathfinder, PathfinderConfig},
-    AmmQuoteCalculator,
+    AmmQuoteCalculator, RoutingPolicy,
 };
 
 fn bench_pathfinding_2hop(c: &mut Criterion) {
     c.bench_function("pathfind_2hop", |b| {
         b.iter(|| {
             let config = PathfinderConfig {
-                max_depth: 4,
                 min_liquidity_threshold: 100_000,
             };
             let pathfinder = Pathfinder::new(config);
+            let routing_policy = RoutingPolicy::default();
 
             let edges = vec![
                 LiquidityEdge {
@@ -30,7 +30,13 @@ fn bench_pathfinding_2hop(c: &mut Criterion) {
                 },
             ];
 
-            let _ = pathfinder.find_paths("XLM", "BTC", &edges, black_box(100_000_000));
+            let _ = pathfinder.find_paths(
+                "XLM",
+                "BTC",
+                &edges,
+                black_box(100_000_000),
+                &routing_policy,
+            );
         })
     });
 }
@@ -39,10 +45,10 @@ fn bench_pathfinding_4hop(c: &mut Criterion) {
     c.bench_function("pathfind_4hop_realistic", |b| {
         b.iter(|| {
             let config = PathfinderConfig {
-                max_depth: 4,
                 min_liquidity_threshold: 100_000,
             };
             let pathfinder = Pathfinder::new(config);
+            let routing_policy = RoutingPolicy::default();
 
             let edges = vec![
                 LiquidityEdge {
@@ -90,7 +96,13 @@ fn bench_pathfinding_4hop(c: &mut Criterion) {
                 },
             ];
 
-            let _ = pathfinder.find_paths("XLM", "BTC", &edges, black_box(500_000_000));
+            let _ = pathfinder.find_paths(
+                "XLM",
+                "BTC",
+                &edges,
+                black_box(500_000_000),
+                &routing_policy,
+            );
         })
     });
 }
@@ -132,12 +144,18 @@ fn bench_pathfinding_fixture(c: &mut Criterion) {
 
         b.iter(|| {
             let config = PathfinderConfig {
-                max_depth: 4,
                 min_liquidity_threshold: 100_000,
             };
             let pathfinder = Pathfinder::new(config);
+            let routing_policy = RoutingPolicy::default();
 
-            let _ = pathfinder.find_paths("XLM", "BTC", &edges, black_box(100_000_000));
+            let _ = pathfinder.find_paths(
+                "XLM",
+                "BTC",
+                &edges,
+                black_box(100_000_000),
+                &routing_policy,
+            );
         })
     });
 }
