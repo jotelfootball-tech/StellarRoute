@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { useTransactionHistory } from "@/hooks/useTransactionHistory"
 import { TransactionRecord } from "@/types/transaction"
 import { 
@@ -15,6 +15,7 @@ import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Card } from "@/components/ui/card"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { ActivityTableSkeleton } from "@/components/shared/ActivityTableSkeleton"
 import { formatDistanceToNow } from "date-fns"
 import { ExternalLink, Trash2, ArrowRight } from "lucide-react"
 
@@ -25,6 +26,15 @@ export function TransactionHistory() {
   const { transactions, clearHistory } = useTransactionHistory(MOCK_WALLET)
   const [filterAsset, setFilterAsset] = useState<string>("ALL")
   const [sortKey, setSortKey] = useState<"date" | "amount">("date")
+  const [isLoading, setIsLoading] = useState(true)
+
+  // Simulate loading for 300ms to show skeleton and prevent flicker on fast data
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setIsLoading(false)
+    }, 300)
+    return () => clearTimeout(timer)
+  }, [])
 
   // Filtering and Sorting
   const filteredTxs = transactions.filter((tx) => {
@@ -92,7 +102,9 @@ export function TransactionHistory() {
       </div>
 
       <ScrollArea className="flex-1">
-        {sortedTxs.length === 0 ? (
+        {isLoading ? (
+          <ActivityTableSkeleton />
+        ) : sortedTxs.length === 0 ? (
           <div className="flex flex-col items-center justify-center p-12 text-center h-full">
             <div className="text-muted-foreground w-16 h-16 mb-4 opacity-50 bg-muted rounded-full flex items-center justify-center">
                <span className="text-2xl">📋</span>

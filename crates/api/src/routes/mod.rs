@@ -5,7 +5,11 @@ pub mod metrics;
 pub mod orderbook;
 pub mod pairs;
 pub mod quote;
+
 pub mod replay;
+
+pub mod ws;
+
 
 use axum::{routing::{get, post}, Router};
 use std::sync::Arc;
@@ -26,10 +30,14 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         )
         .route("/api/v1/quote/:base/:quote", get(quote::get_quote))
         .route("/api/v1/route/:base/:quote", get(quote::get_route))
+
         // Replay routes
         .route("/api/v1/replay", get(replay::list_artifacts))
         .route("/api/v1/replay/:id", get(replay::get_artifact))
         .route("/api/v1/replay/:id/run", post(replay::run_replay))
         .route("/api/v1/replay/:id/diff", post(replay::diff_replay))
+
+        .route("/api/v1/routes/:base/:quote", get(routes_endpoint::get_routes))
+
         .with_state(state)
 }
