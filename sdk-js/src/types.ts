@@ -109,6 +109,16 @@ export interface PriceQuote {
   source_timestamp?: number;
   /** Time-to-live in seconds for client-side staleness detection */
   ttl_seconds?: number;
+  /** Rationale for quote venue selection. */
+  rationale?: {
+    strategy: string;
+    compared_venues: Array<{
+      source: string;
+      price: string;
+      available_amount: string;
+      executable: boolean;
+    }>;
+  };
 }
 
 /**
@@ -172,7 +182,24 @@ export interface HealthStatus {
 }
 
 /**
- * Wire format of the API error body.
+ * Optimal trading route without pricing details.
+ * Response from `GET /api/v1/route/{base}/{quote}`.
+ */
+export interface RouteResponse {
+  base_asset: Asset;
+  quote_asset: Asset;
+  /** Input amount being traded. */
+  amount: string;
+  /** Execution steps for this trade. */
+  path: PathStep[];
+  /** Slippage tolerance in basis points. */
+  slippage_bps: number;
+  /** Unix timestamp of the route calculation. */
+  timestamp: number;
+}
+
+/**
+ * Error response from the StellarRoute API.
  */
 export interface ApiError {
   /** Machine-readable error code, e.g. `"not_found"`. */
@@ -187,11 +214,16 @@ export interface ApiError {
  * Machine-readable error codes returned by the StellarRoute API.
  */
 export type ApiErrorCode =
-  | 'invalid_asset'
-  | 'validation_error'
-  | 'not_found'
-  | 'rate_limit_exceeded'
   | 'internal_error'
-  | 'network_error'
-  | 'unknown_error'
-  | (string & Record<never, never>); // allow unknown codes without losing autocomplete
+  | 'bad_request'
+  | 'not_found'
+  | 'validation_error'
+  | 'rate_limit_exceeded'
+  | 'overloaded'
+  | 'unauthorized'
+  | 'invalid_asset'
+  | 'no_route'
+  | 'stale_market_data'
+  | 'network_error' // SDK specific
+  | 'unknown_error' // SDK specific
+  | (string & Record<never, never>);

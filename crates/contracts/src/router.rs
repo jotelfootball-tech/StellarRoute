@@ -648,7 +648,7 @@ impl StellarRoute {
     /// Public entry point for users to get quotes
     pub fn get_quote(e: Env, amount_in: i128, route: Route) -> Result<QuoteResult, ContractError> {
         if amount_in <= 0 {
-            return Err(ContractError::InvalidRoute);
+            return Err(ContractError::InsufficientInput);
         }
         Self::validate_route_internal(&e, &route)?;
 
@@ -681,6 +681,14 @@ impl StellarRoute {
         };
 
         Ok(quote)
+    }
+
+    /// Validate a route for correctness.
+    ///
+    /// This is a read-path helper for clients to preflight a route before
+    /// requesting a quote or executing a swap.
+    pub fn validate_route(e: Env, route: Route) -> Result<(), ContractError> {
+        Self::validate_route_internal(&e, &route)
     }
 
     pub fn execute_swap(
@@ -992,11 +1000,30 @@ impl StellarRoute {
     }
 
     fn validate_route_internal(e: &Env, route: &Route) -> Result<(), ContractError> {
-        if route.hops.is_empty() || route.hops.len() > MAX_HOPS {
-            return Err(ContractError::InvalidRoute);
+        if route.hops.is_empty() {
+            return Err(ContractError::EmptyRoute);
+        }
+        if route.hops.len() > MAX_HOPS {
+            return Err(ContractError::TooManyHops);
         }
         if route.expires_at > 0 && (e.ledger().sequence() as u64) > route.expires_at {
             return Err(ContractError::RouteExpired);
+        }
+
+        if route.estimated_output < 0 || route.min_output < 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+        if route.estimated_output > 0 && route.min_output > route.estimated_output {
+            return Err(ContractError::InvalidRoute);
+        }
+
+        // Enforce hop-to-hop asset continuity.
+        for i in 0..route.hops.len().saturating_sub(1) {
+            let a = route.hops.get(i).unwrap();
+            let b = route.hops.get(i + 1).unwrap();
+            if a.destination != b.source {
+                return Err(ContractError::InvalidRoute);
+            }
         }
 
         // Validate every asset in the route is on the allowlist.

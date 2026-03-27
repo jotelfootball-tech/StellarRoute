@@ -539,7 +539,7 @@ fn test_get_quote_negative_amount_fails() {
     client.register_pool(&pool);
     assert_eq!(
         client.try_get_quote(&-1, &make_route(&env, &pool, 1)),
-        Err(Ok(ContractError::InvalidRoute))
+        Err(Ok(ContractError::InsufficientInput))
     );
 }
 
@@ -551,7 +551,7 @@ fn test_get_quote_zero_amount_fails() {
     client.register_pool(&pool);
     assert_eq!(
         client.try_get_quote(&0, &make_route(&env, &pool, 1)),
-        Err(Ok(ContractError::InvalidRoute))
+        Err(Ok(ContractError::InsufficientInput))
     );
 }
 
@@ -567,7 +567,7 @@ fn test_get_quote_empty_hops_fails() {
     };
     assert_eq!(
         client.try_get_quote(&1000, &empty),
-        Err(Ok(ContractError::InvalidRoute))
+        Err(Ok(ContractError::EmptyRoute))
     );
 }
 
@@ -579,6 +579,80 @@ fn test_get_quote_too_many_hops_fails() {
     client.register_pool(&pool);
     assert_eq!(
         client.try_get_quote(&1000, &make_route(&env, &pool, 5)),
+        Err(Ok(ContractError::TooManyHops))
+    );
+}
+
+#[test]
+fn test_validate_route_entrypoint_success() {
+    let env = setup_env();
+    let (_, _, client) = deploy_router(&env);
+    let pool = deploy_mock_pool(&env);
+    client.register_pool(&pool);
+    let route = make_route(&env, &pool, 1);
+
+    assert!(client.try_validate_route(&route).is_ok());
+}
+
+#[test]
+fn test_validate_route_entrypoint_empty_route_fails() {
+    let env = setup_env();
+    let (_, _, client) = deploy_router(&env);
+    let empty = Route {
+        hops: Vec::new(&env),
+        estimated_output: 0,
+        min_output: 0,
+        expires_at: 99_999,
+    };
+
+    assert_eq!(
+        client.try_validate_route(&empty),
+        Err(Ok(ContractError::EmptyRoute))
+    );
+}
+
+#[test]
+fn test_get_quote_is_deterministic() {
+    let env = setup_env();
+    let (_, _, client) = deploy_router(&env);
+    let pool = deploy_mock_pool(&env);
+    client.register_pool(&pool);
+    let route = make_route(&env, &pool, 2);
+
+    let q1 = client.get_quote(&1000, &route);
+    let q2 = client.get_quote(&1000, &route);
+    assert_eq!(q1, q2);
+}
+
+#[test]
+fn test_validate_route_hop_continuity_enforced() {
+    let env = setup_env();
+    let (_, _, client) = deploy_router(&env);
+    let pool = deploy_mock_pool(&env);
+    client.register_pool(&pool);
+
+    let mut v = Vec::new(&env);
+    v.push_back(RouteHop {
+        source: Asset::Native,
+        destination: Asset::Native,
+        pool: pool.clone(),
+        pool_type: PoolType::AmmConstProd,
+    });
+    v.push_back(RouteHop {
+        source: Asset::Soroban(Address::generate(&env)),
+        destination: Asset::Native,
+        pool: pool.clone(),
+        pool_type: PoolType::AmmConstProd,
+    });
+    let route = Route {
+        hops: v,
+        estimated_output: 0,
+        min_output: 0,
+        expires_at: 99_999,
+    };
+
+    assert_eq!(
+        client.try_validate_route(&route),
         Err(Ok(ContractError::InvalidRoute))
     );
 }

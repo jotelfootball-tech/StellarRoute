@@ -5,7 +5,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::{sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 
-use crate::cache::CacheManager;
+use crate::cache::{CacheManager, SingleFlight};
+use crate::models::{QuoteResponse, RoutesResponse};
+use crate::graph::GraphManager;
+use crate::worker::{JobQueue, RouteWorkerPool, WorkerPoolConfig};
 
 /// Cache policy configuration
 #[derive(Debug, Clone)]
@@ -22,10 +25,22 @@ impl Default for CachePolicy {
 }
 
 /// In-process cache metrics
-#[derive(Default)]
 pub struct CacheMetrics {
     quote_hits: AtomicU64,
     quote_misses: AtomicU64,
+    stale_quote_rejections: AtomicU64,
+    stale_inputs_excluded: AtomicU64,
+}
+
+impl Default for CacheMetrics {
+    fn default() -> Self {
+        Self {
+            quote_hits: AtomicU64::new(0),
+            quote_misses: AtomicU64::new(0),
+            stale_quote_rejections: AtomicU64::new(0),
+            stale_inputs_excluded: AtomicU64::new(0),
+        }
+    }
 }
 
 impl CacheMetrics {
@@ -37,10 +52,27 @@ impl CacheMetrics {
         self.quote_misses.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Increment the stale-quote-rejection counter by one.
+    pub fn inc_stale_rejection(&self) {
+        self.stale_quote_rejections.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Add `n` to the stale-inputs-excluded counter.
+    pub fn add_stale_inputs_excluded(&self, n: u64) {
+        self.stale_inputs_excluded.fetch_add(n, Ordering::Relaxed);
+    }
+
     pub fn snapshot(&self) -> (u64, u64) {
         (
             self.quote_hits.load(Ordering::Relaxed),
             self.quote_misses.load(Ordering::Relaxed),
+        )
+    }
+
+    pub fn snapshot_staleness(&self) -> (u64, u64) {
+        (
+            self.stale_quote_rejections.load(Ordering::Relaxed),
+            self.stale_inputs_excluded.load(Ordering::Relaxed),
         )
     }
 }
@@ -58,6 +90,14 @@ pub struct AppState {
     pub cache_policy: CachePolicy,
     /// Cache hit/miss counters
     pub cache_metrics: Arc<CacheMetrics>,
+    /// Route computation worker pool
+    pub worker_pool: Arc<RouteWorkerPool>,
+    /// Single-flight manager for quotes to prevent stampedes
+    pub quote_single_flight: Arc<SingleFlight<crate::error::Result<QuoteResponse>>>,
+    /// Single-flight manager for routes
+    pub routes_single_flight: Arc<SingleFlight<crate::error::Result<RoutesResponse>>>,
+    /// Persistent background synced graph manager
+    pub graph_manager: Arc<GraphManager>,
 }
 
 impl AppState {
@@ -68,12 +108,22 @@ impl AppState {
 
     /// Create new application state with an explicit cache policy
     pub fn new_with_policy(db: PgPool, cache_policy: CachePolicy) -> Self {
+        let worker_pool = Self::create_worker_pool(db.clone());
+        let graph_manager = Arc::new(GraphManager::new(db.clone()));
+        graph_manager.clone().start_sync();
+
         Self {
             db,
             cache: None,
             version: env!("CARGO_PKG_VERSION").to_string(),
             cache_policy,
             cache_metrics: Arc::new(CacheMetrics::default()),
+            worker_pool,
+            quote_single_flight: Arc::new(
+                SingleFlight::<crate::error::Result<QuoteResponse>>::new(),
+            ),
+            routes_single_flight: Arc::new(SingleFlight::new()),
+            graph_manager,
         }
     }
 
@@ -88,13 +138,30 @@ impl AppState {
         cache: CacheManager,
         cache_policy: CachePolicy,
     ) -> Self {
+        let worker_pool = Self::create_worker_pool(db.clone());
+        let graph_manager = Arc::new(GraphManager::new(db.clone()));
+        graph_manager.clone().start_sync();
+
         Self {
             db,
             cache: Some(Arc::new(Mutex::new(cache))),
             version: env!("CARGO_PKG_VERSION").to_string(),
             cache_policy,
             cache_metrics: Arc::new(CacheMetrics::default()),
+            worker_pool,
+            quote_single_flight: Arc::new(
+                SingleFlight::<crate::error::Result<QuoteResponse>>::new(),
+            ),
+            routes_single_flight: Arc::new(SingleFlight::new()),
+            graph_manager,
         }
+    }
+
+    /// Create worker pool with configuration
+    fn create_worker_pool(db: PgPool) -> Arc<RouteWorkerPool> {
+        let queue = JobQueue::new(db);
+        let config = WorkerPoolConfig::default();
+        Arc::new(RouteWorkerPool::new(config, queue))
     }
 
     /// Wrap in Arc for sharing across handlers

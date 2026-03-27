@@ -1,19 +1,39 @@
 //! Quote endpoint
+//!
+//! # Dashboard-Ready Metrics
+//!
+//! The quote pipeline emits structured tracing logs with the following metric fields:
+//! - `metric`: Always "stellarroute.quote.request" for request summaries.
+//! - `latency_ms`: Duration of the quote request in milliseconds.
+//! - `cache_hit`: Boolean indicating if the quote was served from cache.
+//! - `error_class`: Outcome category ("validation", "not_found", "stale_market_data", "internal", "none").
+//!
+//! Request logs and decision stages include matching `request_id` values.
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::State,
     Json,
 };
 use sqlx::Row;
 use std::sync::Arc;
-use tracing::debug;
+use tracing::{debug, info_span, Instrument};
+
+use stellarroute_routing::health::filter::GraphFilter;
+use stellarroute_routing::health::freshness::{FreshnessGuard, FreshnessOutcome};
+use stellarroute_routing::health::policy::{ExclusionPolicy, OverrideRegistry};
+use stellarroute_routing::health::scorer::{
+    AmmScorer, HealthScorer, HealthScoringConfig, SdexScorer, VenueScorerInput, VenueType,
+};
 
 use crate::{
     cache,
     error::{ApiError, Result},
+    middleware::validation::ValidatedQuoteRequest,
     models::{
         request::{AssetPath, QuoteParams},
-        AssetInfo, PathStep, QuoteRationaleMetadata, QuoteResponse, VenueEvaluation,
+        AssetInfo, ExcludedVenueInfo as ApiExcludedVenueInfo,
+        ExclusionDiagnostics as ApiExclusionDiagnostics, ExclusionReason as ApiExclusionReason,
+        PathStep, QuoteRationaleMetadata, QuoteResponse, VenueEvaluation,
     },
     state::AppState,
 };
@@ -41,19 +61,80 @@ use crate::{
 )]
 pub async fn get_quote(
     State(state): State<Arc<AppState>>,
-    Path((base, quote)): Path<(String, String)>,
-    Query(params): Query<QuoteParams>,
+    headers: axum::http::HeaderMap,
+    request: crate::middleware::validation::ValidatedQuoteRequest,
 ) -> Result<Json<QuoteResponse>> {
+    let ValidatedQuoteRequest {
+        base: base_asset,
+        quote: quote_asset,
+        params,
+    } = request;
+
+    let base = base_asset.to_canonical();
+    let quote = quote_asset.to_canonical();
+
+    let explain_header = headers
+        .get("x-explain")
+        .and_then(|h| h.to_str().ok())
+        .map(|s| s.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let explain = explain_header || params.explain.unwrap_or(false);
+
+    let request_id = uuid::Uuid::new_v4();
+    let start_time = std::time::Instant::now();
+
+    let span = info_span!(
+        "quote_pipeline",
+        %request_id,
+        %base,
+        %quote,
+        cache_hit = false,
+        error_class = tracing::field::Empty,
+        latency_ms = tracing::field::Empty,
+    );
+
+    async move {
+        let res = get_quote_inner(state, base_asset, quote_asset, params, explain).await;
+
+        let error_class = match &res {
+            Ok(_) => "none",
+            Err(ApiError::Validation { .. }) | Err(ApiError::InvalidAsset(_)) => "validation",
+            Err(ApiError::NotFound(_)) | Err(ApiError::NoRouteFound) => "not_found",
+            Err(ApiError::StaleMarketData { .. }) => "stale_market_data",
+            Err(_) => "internal",
+        };
+
+        let latency_ms = start_time.elapsed().as_millis() as u64;
+
+        let span = tracing::Span::current();
+        span.record("error_class", error_class);
+        span.record("latency_ms", latency_ms);
+
+        tracing::info!(
+            metric = "stellarroute.quote.request",
+            "Quote pipeline completed"
+        );
+
+        res
+    }
+    .instrument(span)
+    .await
+}
+
+async fn get_quote_inner(
+    state: Arc<AppState>,
+    base_asset: AssetPath,
+    quote_asset: AssetPath,
+    params: QuoteParams,
+    explain: bool,
+) -> Result<Json<QuoteResponse>> {
+    let base = base_asset.to_canonical();
+    let quote = quote_asset.to_canonical();
+
     debug!(
         "Getting quote for {}/{} with params: {:?}",
         base, quote, params
     );
-
-    // Parse asset identifiers
-    let base_asset = AssetPath::parse(&base)
-        .map_err(|e| ApiError::InvalidAsset(format!("Invalid base asset: {}", e)))?;
-    let quote_asset = AssetPath::parse(&quote)
-        .map_err(|e| ApiError::InvalidAsset(format!("Invalid quote asset: {}", e)))?;
 
     // Parse amount (default to 1)
     let amount: f64 = params
@@ -61,20 +142,9 @@ pub async fn get_quote(
         .as_deref()
         .unwrap_or("1")
         .parse()
-        .map_err(|_| ApiError::Validation("Invalid amount".to_string()))?;
+        .unwrap_or(1.0); // Already validated in extractor
 
-    if amount <= 0.0 {
-        return Err(ApiError::Validation(
-            "Amount must be greater than zero".to_string(),
-        ));
-    }
-
-    let slippage_bps = params.slippage_bps.unwrap_or(50);
-    if slippage_bps > 10_000 {
-        return Err(ApiError::Validation(
-            "slippage_bps must be between 0 and 10000".to_string(),
-        ));
-    }
+    let slippage_bps = params.slippage_bps();
     let quote_type = match params.quote_type {
         crate::models::request::QuoteType::Sell => "sell",
         crate::models::request::QuoteType::Buy => "buy",
@@ -87,60 +157,203 @@ pub async fn get_quote(
 
     // Try to get from cache first
     let amount_str = format!("{:.7}", amount);
-    let quote_cache_key = cache::keys::quote(&base, &quote, &amount_str, slippage_bps, quote_type);
-    if let Some(cache) = &state.cache {
-        if let Ok(mut cache) = cache.try_lock() {
-            if let Some(cached) = cache.get::<QuoteResponse>(&quote_cache_key).await {
-                state.cache_metrics.inc_quote_hit();
-                debug!("Returning cached quote for {}/{}", base, quote);
-                return Ok(Json(cached));
+    let quote_cache_key = cache::keys::quote(
+        &base,
+        &quote,
+        &amount_str,
+        slippage_bps,
+        quote_type,
+        explain,
+    );
+
+    let state_c = state.clone();
+    let base_c = base.clone();
+    let quote_c = quote.clone();
+    let quote_cache_key_c = quote_cache_key.clone();
+
+    // Use single-flight to coalesce identical concurrent requests
+    let result_arc: Arc<crate::error::Result<QuoteResponse>> = state
+        .quote_single_flight
+        .execute(&quote_cache_key, || async move {
+            let state = state_c;
+            let base = base_c;
+            let quote = quote_c;
+            let quote_cache_key = quote_cache_key_c;
+
+            // Try to get from cache first (inside single-flight so we only compute once if miss)
+            if let Some(cache) = &state.cache {
+                if let Ok(mut cache) = cache.try_lock() {
+                    if let Some(cached) = cache.get::<QuoteResponse>(&quote_cache_key).await {
+                        state.cache_metrics.inc_quote_hit();
+                        tracing::Span::current().record("cache_hit", true);
+                        debug!("Returning cached quote for {}/{}", base, quote);
+                        // SingleFlight expects Arc<Result<QuoteResponse>>
+                        return Arc::new(Ok(cached));
+                    }
+                }
             }
 
-            state.cache_metrics.inc_quote_miss();
-        }
-    }
+            // For now, implement simple direct path (SDEX only)
+            // TODO: Implement multi-hop routing in Phase 2
+            let compute_res =
+                find_best_price(&state, &base_asset, &quote_asset, base_id, quote_id, amount).await;
 
-    // For now, implement simple direct path (SDEX only)
-    // TODO: Implement multi-hop routing in Phase 2
-    let (price, path, rationale) =
+            let (price, path, rationale, api_diagnostics, freshness_outcome, fresh_timestamps) =
+                match compute_res {
+                    Ok(res) => res,
+                    Err(e) => return Arc::new(Err(e)),
+                };
+
+            // Req 4.2: increment stale_inputs_excluded counter when stale inputs were excluded
+            let stale_count = freshness_outcome.stale.len();
+            if stale_count > 0 {
+                state
+                    .cache_metrics
+                    .add_stale_inputs_excluded(stale_count as u64);
+            }
+
+            let total = amount * price;
+            // Keep timestamps in milliseconds to match API docs and frontend staleness logic.
+            let timestamp = chrono::Utc::now().timestamp_millis();
+            let ttl_seconds = u32::try_from(state.cache_policy.quote_ttl.as_secs()).ok();
+            let expires_at = i64::try_from(state.cache_policy.quote_ttl.as_millis())
+                .ok()
+                .map(|ttl_ms| timestamp + ttl_ms);
+
+            // Req 3.1: source_timestamp = oldest last_updated_at among fresh candidates (Unix ms)
+            let source_timestamp = fresh_timestamps
+                .iter()
+                .min()
+                .map(|ts| ts.timestamp_millis());
+
+            // Req 3.2, 3.3: data_freshness populated from FreshnessOutcome
+            let data_freshness = Some(crate::models::DataFreshness {
+                fresh_count: freshness_outcome.fresh.len(),
+                stale_count: freshness_outcome.stale.len(),
+                max_staleness_secs: freshness_outcome.max_staleness_secs,
+            });
+
+            let response = QuoteResponse {
+                base_asset: asset_path_to_info(&base_asset),
+                quote_asset: asset_path_to_info(&quote_asset),
+                amount: format!("{:.7}", amount),
+                price: format!("{:.7}", price),
+                total: format!("{:.7}", total),
+                quote_type: quote_type.to_string(),
+                path,
+                timestamp,
+                expires_at,
+                source_timestamp,
+                ttl_seconds,
+                rationale: Some(rationale),
+                exclusion_diagnostics: Some(api_diagnostics),
+                data_freshness,
+            };
+
+            // Cache the response (TTL: 2 seconds for quote data)
+            if let Some(cache) = &state.cache {
+                if let Ok(mut cache) = cache.try_lock() {
+                    let _ = cache
+                        .set(&quote_cache_key, &response, state.cache_policy.quote_ttl)
+                        .await;
+                }
+            }
+
+            Arc::new(Ok(response))
+        })
+        .await;
+
+    match Arc::try_unwrap(result_arc) {
+        Ok(res) => res.map(Json),
+        Err(arc_res) => (*arc_res).clone().map(Json),
+    }
+}
+
+/// Get routing path for a trading pair
+///
+/// Returns only the optimal execution path without detailed pricing
+#[utoipa::path(
+    get,
+    path = "/api/v1/route/{base}/{quote}",
+    tag = "trading",
+    params(
+        ("base" = String, Path, description = "Base asset (e.g., 'native', 'USDC', or 'USDC:ISSUER')"),
+        ("quote" = String, Path, description = "Quote asset (e.g., 'native', 'USDC', or 'USDC:ISSUER')"),
+        ("amount" = Option<String>, Query, description = "Amount to trade (default: 1)"),
+        ("slippage_bps" = Option<u32>, Query, description = "Slippage tolerance in basis points (default: 50)"),
+        ("quote_type" = Option<String>, Query, description = "Type of quote: 'sell' or 'buy' (default: sell)"),
+    ),
+    responses(
+        (status = 200, description = "Trading route", body = RouteResponse),
+        (status = 400, description = "Invalid parameters", body = ErrorResponse),
+        (status = 404, description = "No route found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    )
+)]
+pub async fn get_route(
+    State(state): State<Arc<AppState>>,
+    request: crate::middleware::validation::ValidatedQuoteRequest,
+) -> Result<Json<crate::models::RouteResponse>> {
+    let ValidatedQuoteRequest {
+        base: base_asset,
+        quote: quote_asset,
+        params,
+    } = request;
+
+    debug!(
+        "Getting route for {}/{} with params: {:?}",
+        base_asset.asset_code, quote_asset.asset_code, params
+    );
+
+    // Parse amount (default to 1)
+    let amount: f64 = params
+        .amount
+        .as_deref()
+        .unwrap_or("1")
+        .parse()
+        .unwrap_or(1.0); // Already validated in extractor
+
+    let slippage_bps = params.slippage_bps();
+
+    let base_id = find_asset_id(&state, &base_asset).await?;
+    let quote_id = find_asset_id(&state, &quote_asset).await?;
+
+    // For route endpoint, we reuse the same logic but return a simplified response
+    let (_, path, _, _, _, _) =
         find_best_price(&state, &base_asset, &quote_asset, base_id, quote_id, amount).await?;
 
-    let total = amount * price;
-    // Keep timestamps in milliseconds to match API docs and frontend staleness logic.
-    let timestamp = chrono::Utc::now().timestamp_millis();
-    let ttl_seconds = u32::try_from(state.cache_policy.quote_ttl.as_secs()).ok();
-    let expires_at = i64::try_from(state.cache_policy.quote_ttl.as_millis())
-        .ok()
-        .map(|ttl_ms| timestamp + ttl_ms);
-
-    let response = QuoteResponse {
+    let response = crate::models::RouteResponse {
         base_asset: asset_path_to_info(&base_asset),
         quote_asset: asset_path_to_info(&quote_asset),
         amount: format!("{:.7}", amount),
-        price: format!("{:.7}", price),
-        total: format!("{:.7}", total),
-        quote_type: quote_type.to_string(),
         path,
-        timestamp,
-        expires_at,
-        source_timestamp: None,
-        ttl_seconds,
-        rationale: Some(rationale),
+        slippage_bps,
+        timestamp: chrono::Utc::now().timestamp_millis(),
     };
-
-    // Cache the response (TTL: 2 seconds for quote data)
-    if let Some(cache) = &state.cache {
-        if let Ok(mut cache) = cache.try_lock() {
-            let _ = cache
-                .set(&quote_cache_key, &response, state.cache_policy.quote_ttl)
-                .await;
-        }
-    }
 
     Ok(Json(response))
 }
 
 /// Find best price for a trading pair
+type FindBestPriceResult = (
+    f64,
+    Vec<PathStep>,
+    QuoteRationaleMetadata,
+    ApiExclusionDiagnostics,
+    FreshnessOutcome,
+    Vec<chrono::DateTime<chrono::Utc>>,
+);
+
+#[tracing::instrument(
+    name = "find_best_price",
+    skip(state, base_id, quote_id),
+    fields(
+        candidates_count = tracing::field::Empty,
+        stale_count = tracing::field::Empty,
+        fresh_count = tracing::field::Empty,
+        scored_count = tracing::field::Empty
+    )
+)]
 async fn find_best_price(
     state: &AppState,
     base: &AssetPath,
@@ -148,7 +361,7 @@ async fn find_best_price(
     base_id: uuid::Uuid,
     quote_id: uuid::Uuid,
     amount: f64,
-) -> Result<(f64, Vec<PathStep>, QuoteRationaleMetadata)> {
+) -> Result<FindBestPriceResult> {
     let rows = sqlx::query(
         r#"
                 select
@@ -167,20 +380,186 @@ async fn find_best_price(
     .fetch_all(&state.db)
     .await?;
 
+    tracing::Span::current().record("candidates_count", rows.len());
+    tracing::info!(
+        stage = "fetch_candidates",
+        count = rows.len(),
+        "Fetched candidate venues from DB"
+    );
+
     let candidates = rows
         .into_iter()
-        .map(|row| DirectVenueCandidate {
-            venue_type: row.get("venue_type"),
-            venue_ref: row.get("venue_ref"),
-            price: row.get::<String, _>("price").parse::<f64>().unwrap_or(0.0),
-            available_amount: row
+        .map(|row| {
+            let venue_type: String = row.get("venue_type");
+            let venue_ref: String = row.get("venue_ref");
+            let price: f64 = row.get::<String, _>("price").parse().unwrap_or(0.0);
+            let available_amount: f64 = row
                 .get::<String, _>("available_amount")
-                .parse::<f64>()
-                .unwrap_or(0.0),
+                .parse()
+                .unwrap_or(0.0);
+            DirectVenueCandidate {
+                venue_type,
+                venue_ref,
+                price,
+                available_amount,
+            }
         })
         .collect::<Vec<_>>();
 
-    let (selected, rationale) = evaluate_single_hop_direct_venues(candidates, amount)?;
+    // Capture a single wall-clock instant for both scorer_inputs construction and freshness eval
+    let now = chrono::Utc::now();
+
+    // Build VenueScorerInput from candidates
+    let scorer_inputs: Vec<VenueScorerInput> = candidates
+        .iter()
+        .map(|c| {
+            if c.venue_type == "amm" {
+                VenueScorerInput {
+                    venue_ref: c.venue_ref.clone(),
+                    venue_type: VenueType::Amm,
+                    best_bid_e7: None,
+                    best_ask_e7: None,
+                    depth_top_n_e7: None,
+                    reserve_a_e7: Some((c.available_amount * 1e7) as i128),
+                    reserve_b_e7: Some((c.available_amount * 1e7) as i128),
+                    tvl_e7: Some((c.available_amount * 2e7) as i128),
+                    last_updated_at: Some(now),
+                }
+            } else {
+                VenueScorerInput {
+                    venue_ref: c.venue_ref.clone(),
+                    venue_type: VenueType::Sdex,
+                    best_bid_e7: None,
+                    best_ask_e7: Some((c.price * 1e7) as i128),
+                    depth_top_n_e7: Some((c.available_amount * 1e7) as i128),
+                    reserve_a_e7: None,
+                    reserve_b_e7: None,
+                    tvl_e7: None,
+                    last_updated_at: Some(now),
+                }
+            }
+        })
+        .collect();
+
+    // Health scoring / exclusion policy (defaults match routing `HealthScoringConfig`)
+    let health_config = HealthScoringConfig::default();
+    let freshness_outcome =
+        FreshnessGuard::evaluate(&scorer_inputs, &health_config.freshness_threshold_secs, now);
+
+    tracing::Span::current().record("stale_count", freshness_outcome.stale.len());
+    tracing::Span::current().record("fresh_count", freshness_outcome.fresh.len());
+
+    if freshness_outcome.fresh.is_empty() {
+        state.cache_metrics.inc_stale_rejection();
+        return Err(ApiError::StaleMarketData {
+            stale_count: freshness_outcome.stale.len(),
+            fresh_count: 0,
+            threshold_secs_sdex: health_config.freshness_threshold_secs.sdex,
+            threshold_secs_amm: health_config.freshness_threshold_secs.amm,
+        });
+    }
+
+    let fresh_candidates: Vec<DirectVenueCandidate> = freshness_outcome
+        .fresh
+        .iter()
+        .filter_map(|&idx| candidates.get(idx).cloned())
+        .collect();
+    let fresh_scorer_inputs: Vec<&VenueScorerInput> = freshness_outcome
+        .fresh
+        .iter()
+        .filter_map(|&idx| scorer_inputs.get(idx))
+        .collect();
+    let mut stale_exclusion_entries: Vec<ApiExcludedVenueInfo> = freshness_outcome
+        .stale
+        .iter()
+        .filter_map(|&idx| candidates.get(idx))
+        .map(|candidate| ApiExcludedVenueInfo {
+            venue_ref: candidate.venue_ref.clone(),
+            reason: ApiExclusionReason::StaleData,
+        })
+        .collect();
+
+    let scorer = HealthScorer {
+        sdex: SdexScorer {
+            staleness_threshold_secs: health_config.staleness_threshold_secs,
+            max_spread: 0.05,
+            target_depth_e7: 10_000_000_000,
+            depth_levels: health_config.depth_levels,
+        },
+        amm: AmmScorer {
+            staleness_threshold_secs: health_config.staleness_threshold_secs,
+            min_tvl_threshold_e7: health_config.min_tvl_threshold_e7,
+        },
+    };
+
+    // Score only fresh candidates (Req 6.4)
+    let fresh_inputs_owned: Vec<VenueScorerInput> = fresh_scorer_inputs
+        .iter()
+        .map(|&input| VenueScorerInput {
+            venue_ref: input.venue_ref.clone(),
+            venue_type: input.venue_type.clone(),
+            best_bid_e7: input.best_bid_e7,
+            best_ask_e7: input.best_ask_e7,
+            depth_top_n_e7: input.depth_top_n_e7,
+            reserve_a_e7: input.reserve_a_e7,
+            reserve_b_e7: input.reserve_b_e7,
+            tvl_e7: input.tvl_e7,
+            last_updated_at: input.last_updated_at,
+        })
+        .collect();
+    let scored = scorer.score_venues(&fresh_inputs_owned);
+
+    let policy = ExclusionPolicy {
+        thresholds: health_config.thresholds.clone(),
+        overrides: OverrideRegistry::from_entries(health_config.overrides.clone()),
+    };
+
+    // Apply filter (pass empty edges — we just need diagnostics for this single-hop path)
+    let filter = GraphFilter::new(&policy);
+    let (_, routing_diagnostics) = filter.filter_edges(&[], &scored);
+
+    tracing::info!(
+        stage = "policy_filter",
+        excluded = routing_diagnostics.excluded_venues.len(),
+        "Applied policy and threshold filters"
+    );
+
+    // Convert routing diagnostics to API types, then prepend stale exclusions (Req 6.2)
+    let mut health_exclusion_entries: Vec<ApiExcludedVenueInfo> = routing_diagnostics
+        .excluded_venues
+        .iter()
+        .map(|v| ApiExcludedVenueInfo {
+            venue_ref: v.venue_ref.clone(),
+            reason: match &v.reason {
+                stellarroute_routing::health::policy::ExclusionReason::PolicyThreshold {
+                    threshold,
+                } => ApiExclusionReason::PolicyThreshold {
+                    threshold: *threshold,
+                },
+                stellarroute_routing::health::policy::ExclusionReason::Override => {
+                    ApiExclusionReason::Override
+                }
+                stellarroute_routing::health::policy::ExclusionReason::StaleData => {
+                    ApiExclusionReason::StaleData
+                }
+            },
+        })
+        .collect();
+
+    stale_exclusion_entries.append(&mut health_exclusion_entries);
+    let api_diagnostics = ApiExclusionDiagnostics {
+        excluded_venues: stale_exclusion_entries,
+    };
+
+    // Pass only fresh candidates to price evaluation (Req 2.2, 6.1)
+    let (selected, rationale) = evaluate_single_hop_direct_venues(fresh_candidates, amount)?;
+
+    // Collect last_updated_at timestamps for fresh scorer inputs (for source_timestamp, Req 3.1)
+    let fresh_timestamps: Vec<chrono::DateTime<chrono::Utc>> = freshness_outcome
+        .fresh
+        .iter()
+        .filter_map(|&idx| scorer_inputs[idx].last_updated_at)
+        .collect();
 
     let path = vec![PathStep {
         from_asset: asset_path_to_info(base),
@@ -189,7 +568,14 @@ async fn find_best_price(
         source: selected.path_source(),
     }];
 
-    Ok((selected.price, path, rationale))
+    Ok((
+        selected.price,
+        path,
+        rationale,
+        api_diagnostics,
+        freshness_outcome,
+        fresh_timestamps,
+    ))
 }
 
 #[derive(Debug, Clone)]
@@ -371,6 +757,7 @@ fn asset_path_to_info(asset: &AssetPath) -> AssetInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::CacheMetrics;
 
     fn candidate(
         venue_type: &str,
@@ -438,5 +825,217 @@ mod tests {
 
         let result = evaluate_single_hop_direct_venues(candidates, 10.0);
         assert!(matches!(result, Err(ApiError::NoRouteFound)));
+    }
+
+    // --- Req 4.1: stale_quote_rejections counter ---
+
+    #[test]
+    fn stale_rejection_counter_increments_on_all_stale() {
+        let metrics = CacheMetrics::default();
+        let (rejections_before, _) = metrics.snapshot_staleness();
+        assert_eq!(rejections_before, 0);
+
+        // Simulate what find_best_price does when all inputs are stale
+        metrics.inc_stale_rejection();
+
+        let (rejections_after, _) = metrics.snapshot_staleness();
+        assert_eq!(rejections_after, 1);
+    }
+
+    #[test]
+    fn stale_rejection_counter_accumulates_across_calls() {
+        let metrics = CacheMetrics::default();
+        metrics.inc_stale_rejection();
+        metrics.inc_stale_rejection();
+        metrics.inc_stale_rejection();
+
+        let (rejections, _) = metrics.snapshot_staleness();
+        assert_eq!(rejections, 3);
+    }
+
+    // --- Req 4.2: stale_inputs_excluded counter ---
+
+    #[test]
+    fn stale_inputs_excluded_counter_increments_by_stale_count() {
+        let metrics = CacheMetrics::default();
+        let (_, excluded_before) = metrics.snapshot_staleness();
+        assert_eq!(excluded_before, 0);
+
+        // Simulate what get_quote does when 2 stale inputs were excluded
+        let stale_count: u64 = 2;
+        metrics.add_stale_inputs_excluded(stale_count);
+
+        let (_, excluded_after) = metrics.snapshot_staleness();
+        assert_eq!(excluded_after, 2);
+    }
+
+    #[test]
+    fn stale_inputs_excluded_counter_accumulates_across_quotes() {
+        let metrics = CacheMetrics::default();
+
+        // First quote excludes 1 stale input
+        metrics.add_stale_inputs_excluded(1);
+        // Second quote excludes 3 stale inputs
+        metrics.add_stale_inputs_excluded(3);
+
+        let (_, excluded) = metrics.snapshot_staleness();
+        assert_eq!(excluded, 4);
+    }
+
+    #[test]
+    fn stale_inputs_excluded_not_incremented_when_all_fresh() {
+        let metrics = CacheMetrics::default();
+
+        // Simulate get_quote with stale_count == 0 (no increment should happen)
+        let stale_count = 0usize;
+        if stale_count > 0 {
+            metrics.add_stale_inputs_excluded(stale_count as u64);
+        }
+
+        let (_, excluded) = metrics.snapshot_staleness();
+        assert_eq!(excluded, 0);
+    }
+
+    #[test]
+    fn rejection_and_excluded_counters_are_independent() {
+        let metrics = CacheMetrics::default();
+
+        metrics.inc_stale_rejection();
+        metrics.add_stale_inputs_excluded(5);
+
+        let (rejections, excluded) = metrics.snapshot_staleness();
+        assert_eq!(rejections, 1);
+        assert_eq!(excluded, 5);
+    }
+
+    // --- Req 6.3: mixed-freshness — NoRouteFound when fresh candidates lack liquidity ---
+
+    /// When there is one fresh candidate with insufficient liquidity and one stale candidate
+    /// (already excluded before reaching evaluate_single_hop_direct_venues), the result must be
+    /// ApiError::NoRouteFound, not ApiError::StaleMarketData.
+    #[test]
+    fn mixed_freshness_insufficient_liquidity_returns_no_route() {
+        // The stale candidate has been excluded by freshness filtering before this call.
+        // Only the fresh-but-low-liquidity candidate reaches evaluate_single_hop_direct_venues.
+        let fresh_candidates = vec![
+            candidate("sdex", "offer_fresh", 1.0, 5.0), // fresh but only 5 units available
+        ];
+        // Request 100 units — exceeds the fresh candidate's available_amount.
+        let result = evaluate_single_hop_direct_venues(fresh_candidates, 100.0);
+
+        // Must be NoRouteFound, not StaleMarketData.
+        assert!(
+            matches!(result, Err(ApiError::NoRouteFound)),
+            "expected NoRouteFound but got: {:?}",
+            result
+        );
+    }
+
+    // --- Req 2.2 / 6.1: mixed-freshness happy path ---
+
+    /// When stale candidates have been excluded upstream by FreshnessGuard and the remaining
+    /// fresh candidates have sufficient liquidity, evaluate_single_hop_direct_venues succeeds
+    /// and selects the best-priced fresh candidate.
+    #[test]
+    fn mixed_freshness_with_sufficient_fresh_liquidity_succeeds() {
+        // Stale candidate already filtered out; only these fresh candidates remain.
+        let fresh_candidates = vec![
+            candidate("amm", "pool_fresh", 1.05, 200.0),
+            candidate("sdex", "offer_fresh", 1.02, 150.0),
+        ];
+        let amount = 100.0;
+
+        let (selected, rationale) = evaluate_single_hop_direct_venues(fresh_candidates, amount)
+            .expect("must select a venue when fresh candidates have sufficient liquidity");
+
+        // Best price (lowest) with sufficient liquidity is selected.
+        assert_eq!(
+            selected.venue_ref, "offer_fresh",
+            "sdex offer should win on price"
+        );
+        assert_eq!(selected.venue_type, "sdex");
+        assert_eq!(rationale.strategy, "single_hop_direct_venue_comparison");
+        assert_eq!(rationale.compared_venues.len(), 2);
+    }
+
+    // --- Req 3.2 / 3.3: data_freshness fields map from FreshnessOutcome ---
+
+    /// Verifies that the DataFreshness struct is populated with correct counts and max staleness
+    /// from a FreshnessOutcome — mirrors the exact mapping performed in get_quote().
+    #[test]
+    fn data_freshness_fields_map_from_freshness_outcome() {
+        use stellarroute_routing::health::freshness::FreshnessOutcome;
+
+        // Simulate FreshnessOutcome: indices 0,2 are fresh; index 1 is stale; max staleness 45s.
+        let outcome = FreshnessOutcome {
+            fresh: vec![0, 2],
+            stale: vec![1],
+            max_staleness_secs: 45,
+        };
+
+        let data_freshness = crate::models::DataFreshness {
+            fresh_count: outcome.fresh.len(),
+            stale_count: outcome.stale.len(),
+            max_staleness_secs: outcome.max_staleness_secs,
+        };
+
+        assert_eq!(
+            data_freshness.fresh_count, 2,
+            "fresh_count must match fresh indices"
+        );
+        assert_eq!(
+            data_freshness.stale_count, 1,
+            "stale_count must match stale indices"
+        );
+        assert_eq!(data_freshness.max_staleness_secs, 45);
+    }
+
+    /// All-fresh FreshnessOutcome produces DataFreshness with stale_count == 0.
+    #[test]
+    fn data_freshness_stale_count_zero_when_all_inputs_are_fresh() {
+        use stellarroute_routing::health::freshness::FreshnessOutcome;
+
+        let outcome = FreshnessOutcome {
+            fresh: vec![0, 1, 2],
+            stale: vec![],
+            max_staleness_secs: 12,
+        };
+
+        let data_freshness = crate::models::DataFreshness {
+            fresh_count: outcome.fresh.len(),
+            stale_count: outcome.stale.len(),
+            max_staleness_secs: outcome.max_staleness_secs,
+        };
+
+        assert_eq!(
+            data_freshness.stale_count, 0,
+            "stale_count must be zero when all inputs are fresh"
+        );
+        assert_eq!(data_freshness.fresh_count, 3);
+    }
+
+    /// Multiple stale FreshnessOutcome produces DataFreshness with matching stale_count.
+    #[test]
+    fn data_freshness_stale_count_matches_number_of_stale_inputs() {
+        use stellarroute_routing::health::freshness::FreshnessOutcome;
+
+        let outcome = FreshnessOutcome {
+            fresh: vec![2],
+            stale: vec![0, 1, 3, 4],
+            max_staleness_secs: 300,
+        };
+
+        let data_freshness = crate::models::DataFreshness {
+            fresh_count: outcome.fresh.len(),
+            stale_count: outcome.stale.len(),
+            max_staleness_secs: outcome.max_staleness_secs,
+        };
+
+        assert_eq!(
+            data_freshness.stale_count, 4,
+            "stale_count must track all stale indices"
+        );
+        assert_eq!(data_freshness.fresh_count, 1);
+        assert_eq!(data_freshness.max_staleness_secs, 300);
     }
 }

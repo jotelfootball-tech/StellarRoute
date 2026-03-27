@@ -9,6 +9,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { PathStep } from "@/types";
+import { RouteVisualization } from "./RouteVisualization";
 import { describeTradeRoute } from "@/lib/route-helpers";
 import { TransactionStatus } from "@/types/transaction";
 import {
@@ -19,7 +20,14 @@ import {
   Wallet,
   ExternalLink,
   ChevronRight,
+  TriangleAlert,
+  AlertCircle,
+  Info,
 } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import { getAssetCode, parseSource } from "@/lib/route-helpers";
+import { cn } from "@/lib/utils";
+import { getSlippageWarningLevel } from "@/lib/slippage";
 
 interface TransactionConfirmationModalProps {
   isOpen: boolean;
@@ -72,6 +80,16 @@ export function TransactionConfirmationModal({
 }: TransactionConfirmationModalProps) {
   const [countdown, setCountdown] = useState(15);
 
+  const priceImpactValue = useMemo(() => parseFloat(priceImpact) || 0, [priceImpact]);
+  const isHighPriceImpact = priceImpactValue >= 2;
+  const isSeverePriceImpact = priceImpactValue >= 5;
+
+  const slippageWarningLevel = getSlippageWarningLevel(
+    slippageTolerancePct ?? null,
+  );
+  const isHighSlippage = slippageWarningLevel === "high";
+  const isLowSlippage = slippageWarningLevel === "low";
+
   const computedMinReceived = useMemo(() => {
     const toAmountN = parseMaybeNumber(toAmount);
     if (toAmountN === undefined) return undefined;
@@ -88,12 +106,11 @@ export function TransactionConfirmationModal({
 
   // Auto-refresh mock timer during review state
   useEffect(() => {
-    let timer: NodeJS.Timeout;
+    let timer: any;
     if (isOpen && status === "review") {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setCountdown(15);
       timer = setInterval(() => {
-        setCountdown((prev) => {
+        setCountdown((prev: number) => {
           if (prev <= 1) return 15; // Reset loop for demo
           return prev - 1;
         });
@@ -112,7 +129,7 @@ export function TransactionConfirmationModal({
 
   return (
     <Dialog open={isOpen} onOpenChange={handleOpenChange}>
-      <DialogContent className="sm:max-w-[425px]">
+      <DialogContent className="sm:max-w-[425px] w-[90vw] sm:w-auto">
         {/* REVIEW STATE */}
         {status === "review" && (
           <>
@@ -123,6 +140,7 @@ export function TransactionConfirmationModal({
               </DialogDescription>
             </DialogHeader>
 
+            <div className="overflow-y-auto max-h-[70vh]">
             <div className="space-y-4 py-4">
               {/* Swap Summary */}
               <div className="p-4 rounded-lg bg-muted/30 border space-y-3">
@@ -151,9 +169,55 @@ export function TransactionConfirmationModal({
                     <p className="text-lg font-bold text-success">
                       ~{toAmount} {toAsset}
                     </p>
+                    <p className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                      Estimated Minimum: {minReceivedToDisplay ?? "—"} {toAsset}
+                    </p>
                   </div>
                 </div>
               </div>
+
+              {/* Warnings Section */}
+              {(isHighPriceImpact || isHighSlippage || isLowSlippage) && (
+                <div className="space-y-2">
+                  {isSeverePriceImpact ? (
+                    <div className="flex gap-2 p-3 rounded-lg bg-destructive/10 border border-destructive/20 text-destructive text-xs">
+                      <TriangleAlert className="w-4 h-4 shrink-0" />
+                      <div>
+                        <p className="font-bold">Very High Price Impact ({priceImpact})</p>
+                        <p>This trade will significantly move the market price. You may receive much less than expected.</p>
+                      </div>
+                    </div>
+                  ) : isHighPriceImpact ? (
+                    <div className="flex gap-2 p-3 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-600 dark:text-amber-400 text-xs">
+                      <AlertCircle className="w-4 h-4 shrink-0" />
+                      <div>
+                        <p className="font-bold">High Price Impact ({priceImpact})</p>
+                        <p>The price for this trade is significantly different from the current market rate.</p>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {isHighSlippage && (
+                    <div className="flex gap-2 p-2 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-600 dark:text-amber-400 text-xs">
+                      <Info className="w-4 h-4 shrink-0" />
+                      <div>
+                        <p className="font-medium text-amber-700 dark:text-amber-300">High Slippage Tolerance ({slippageTolerancePct}%)</p>
+                        <p className="opacity-80">Your transaction might be frontrun or you may receive a much worse price.</p>
+                      </div>
+                    </div>
+                  )}
+
+                  {isLowSlippage && (
+                    <div className="flex gap-2 p-2 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-600 dark:text-amber-400 text-xs">
+                      <Info className="w-4 h-4 shrink-0" />
+                      <div>
+                        <p className="font-medium">Very Low Slippage</p>
+                        <p className="opacity-80">Transaction might fail if the price moves even slightly before confirmation.</p>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Trade Details */}
               <div className="space-y-2 text-sm">
@@ -193,49 +257,27 @@ export function TransactionConfirmationModal({
                   <span className="text-muted-foreground">Network Fee</span>
                   <span>{networkFee} XLM</span>
                 </div>
-                <div className="flex flex-col gap-1 sm:flex-row sm:justify-between sm:items-center pt-2">
-                  <span className="text-muted-foreground shrink-0">Route</span>
-                  <div
-                    className="flex flex-wrap items-center gap-x-0.5 gap-y-1 text-xs sm:justify-end sm:max-w-[min(100%,16rem)]"
-                    aria-label={`Execution route: ${describeTradeRoute(routePath)}`}
-                  >
-                    {routePath.map((step, idx) => {
-                      const from =
-                        step.from_asset.asset_type === "native"
-                          ? "XLM"
-                          : step.from_asset.asset_code;
-                      const to =
-                        step.to_asset.asset_type === "native"
-                          ? "XLM"
-                          : step.to_asset.asset_code;
-                      return (
-                        <span
-                          key={idx}
-                          className="inline-flex items-center gap-0.5"
-                          aria-hidden="true"
-                        >
-                          {idx === 0 && <span>{from}</span>}
-                          <ChevronRight className="w-3 h-3 text-muted-foreground shrink-0" />
-                          <span>{to}</span>
-                        </span>
-                      );
-                    })}
-                  </div>
+                <div className="flex flex-col gap-1 pt-2">
+                  <RouteVisualization 
+                    path={routePath} 
+                    className="border-none shadow-none bg-transparent p-0"
+                  />
                 </div>
               </div>
               <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-950 dark:text-amber-100">
                 Demo mode: signing and submission are simulated — not yet on-chain.
               </div>
             </div>
+            </div>
 
             <DialogFooter className="flex-col sm:flex-col gap-2">
-              <Button onClick={onConfirm} className="w-full" size="lg">
+              <Button onClick={onConfirm} className="w-full min-h-[48px]" size="lg">
                 Confirm Swap
               </Button>
               <Button
                 type="button"
                 variant="outline"
-                className="w-full"
+                className="w-full min-h-[48px]"
                 onClick={() => handleOpenChange(false)}
               >
                 Cancel
@@ -302,14 +344,16 @@ export function TransactionConfirmationModal({
             </div>
             
             {txHash && (
-              <a
-                href={`https://stellar.expert/explorer/public/tx/${txHash}`}
-                target="_blank"
-                rel="noreferrer"
-                className="flex items-center gap-1 text-sm text-primary hover:underline"
-              >
-                View on Stellar Expert <ExternalLink className="w-4 h-4" />
-              </a>
+              <div className="min-h-[44px] flex items-center">
+                <a
+                  href={`https://stellar.expert/explorer/public/tx/${txHash}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="flex items-center gap-1 text-sm text-primary hover:underline"
+                >
+                  View on Stellar Expert <ExternalLink className="w-4 h-4" />
+                </a>
+              </div>
             )}
 
             <Button onClick={() => handleOpenChange(false)} className="w-full mt-4">

@@ -1,13 +1,13 @@
 //! Pathfinding algorithms for swap routing with N-hop support and safety bounds
 
 use crate::error::{Result, RoutingError};
+use crate::policy::RoutingPolicy;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 
 /// Configuration for path discovery
 #[derive(Clone, Debug)]
 pub struct PathfinderConfig {
-    /// Maximum hop depth
-    pub max_depth: usize,
     /// Minimum liquidity threshold for intermediate assets
     pub min_liquidity_threshold: i128,
 }
@@ -15,35 +15,38 @@ pub struct PathfinderConfig {
 impl Default for PathfinderConfig {
     fn default() -> Self {
         Self {
-            max_depth: 4,
             min_liquidity_threshold: 1_000_000, // 1 unit in e7
         }
     }
 }
 
 /// Represents a liquidity edge in the routing graph
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LiquidityEdge {
     pub from: String,
     pub to: String,
     pub venue_type: String,
     pub venue_ref: String,
     pub liquidity: i128,
+    pub price: f64,
+    pub fee_bps: u32,
 }
 
 /// Represents a path through liquidity sources
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SwapPath {
     pub hops: Vec<PathHop>,
     pub estimated_output: i128,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PathHop {
     pub source_asset: String,
     pub destination_asset: String,
     pub venue_type: String,
     pub venue_ref: String,
+    pub price: f64,
+    pub fee_bps: u32,
 }
 
 /// N-hop pathfinder with safety bounds
@@ -63,6 +66,7 @@ impl Pathfinder {
         to: &str,
         edges: &[LiquidityEdge],
         amount_in: i128,
+        policy: &RoutingPolicy,
     ) -> Result<Vec<SwapPath>> {
         if from.is_empty() || to.is_empty() {
             return Err(RoutingError::InvalidPair(
@@ -82,11 +86,11 @@ impl Pathfinder {
             ));
         }
 
-        // Build adjacency list
-        let graph = self.build_graph(edges)?;
+        // Build adjacency list, applying policy filters on venues
+        let graph = self.build_graph(edges, policy)?;
 
         // BFS with depth limit and cycle prevention
-        let paths = self.bfs_paths(&graph, from, to, amount_in)?;
+        let paths = self.bfs_paths(&graph, from, to, amount_in, policy.max_hops)?;
 
         if paths.is_empty() {
             return Err(RoutingError::NoRoute(from.to_string(), to.to_string()));
@@ -95,10 +99,19 @@ impl Pathfinder {
         Ok(paths)
     }
 
-    fn build_graph(&self, edges: &[LiquidityEdge]) -> Result<HashMap<String, Vec<LiquidityEdge>>> {
+    fn build_graph(
+        &self,
+        edges: &[LiquidityEdge],
+        policy: &RoutingPolicy,
+    ) -> Result<HashMap<String, Vec<LiquidityEdge>>> {
         let mut graph: HashMap<String, Vec<LiquidityEdge>> = HashMap::new();
 
         for edge in edges {
+            // Apply venue type routing policy
+            if !policy.is_venue_allowed(&edge.venue_type) {
+                continue;
+            }
+
             if edge.liquidity < self.config.min_liquidity_threshold {
                 continue; // Skip low-liquidity edges
             }
@@ -118,6 +131,7 @@ impl Pathfinder {
         from: &str,
         to: &str,
         amount_in: i128,
+        max_hops: usize,
     ) -> Result<Vec<SwapPath>> {
         let mut paths = Vec::new();
         let mut queue = VecDeque::new();
@@ -128,8 +142,8 @@ impl Pathfinder {
         queue.push_back((from.to_string(), Vec::new(), initial_visited, amount_in));
 
         while let Some((current, path_hops, visited, estimated_output)) = queue.pop_front() {
-            // Enforce max depth
-            if path_hops.len() >= self.config.max_depth {
+            // Enforce max depth from policy
+            if path_hops.len() >= max_hops {
                 continue;
             }
 
@@ -158,6 +172,8 @@ impl Pathfinder {
                         destination_asset: edge.to.clone(),
                         venue_type: edge.venue_type.clone(),
                         venue_ref: edge.venue_ref.clone(),
+                        price: edge.price,
+                        fee_bps: edge.fee_bps,
                     };
 
                     // Simple output estimation (50bps slippage per hop)

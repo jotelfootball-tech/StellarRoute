@@ -168,29 +168,60 @@ describe('getQuote', () => {
     expect(spy.mock.calls[0]?.[0] as string).not.toContain('amount=');
   });
 
-  it('throws isValidationError() on 400', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-      apiError('validation_error', 'Amount must be greater than zero', 400),
-    );
-    const err = await new StellarRouteClient({ retries: 0 })
-      .getQuote('native', 'USDC', -1)
-      .catch((e: unknown) => e);
+  it('appends slippage_bps query parameter when provided', async () => {
+    const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(ok(sampleQuote));
+    await new StellarRouteClient().getQuote('native', 'USDC', 100, 'sell', 100);
+    const url = new URL(spy.mock.calls[0]?.[0] as string);
+    expect(url.searchParams.get('slippage_bps')).toBe('100');
+  });
 
-    expect(isStellarRouteApiError(err)).toBe(true);
-    expect((err as StellarRouteApiError).isValidationError()).toBe(true);
-    expect((err as StellarRouteApiError).status).toBe(400);
+  it('throws StellarRouteApiError on 400 validation error', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      apiError('validation_error', 'Invalid amount', 400),
+    );
+    const client = new StellarRouteClient({ retries: 0 });
+    try {
+      await client.getQuote('native', 'USDC', -10);
+      expect.fail('should have thrown');
+    } catch (err) {
+      expect(isStellarRouteApiError(err)).toBe(true);
+      if (isStellarRouteApiError(err)) {
+        expect(err.status).toBe(400);
+        expect(err.code).toBe('validation_error');
+        expect(err.isValidationError()).toBe(true);
+      }
+    }
   });
 });
 
 // ── getRoutes ─────────────────────────────────────────────────────────────────
 
 describe('getRoutes', () => {
-  it('returns path steps from the quote response', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(ok(sampleQuote));
-    const routes = await new StellarRouteClient().getRoutes('native', 'USDC', 100);
-    expect(routes).toEqual(sampleQuote.path);
-    expect(routes).toHaveLength(1);
-    expect(routes[0]?.source).toBe('sdex');
+  it('returns only the path array on 200', async () => {
+    const sampleRoute = {
+      base_asset: NATIVE,
+      quote_asset: USDC,
+      amount: '100',
+      path: sampleQuote.path,
+      slippage_bps: 50,
+      timestamp: Date.now(),
+    };
+
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(ok(sampleRoute));
+    const result = await new StellarRouteClient().getRoutes('native', 'USDC', 100);
+    expect(Array.isArray(result)).toBe(true);
+    expect(result).toHaveLength(1);
+    expect(result[0]?.source).toBe('sdex');
+  });
+
+  it('calls the correct endpoint with parameters', async () => {
+    const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(ok({ path: [] }));
+    await new StellarRouteClient().getRoutes('native', 'USDC', 100, 'buy', 100);
+    const url = new URL(spy.mock.calls[0]?.[0] as string);
+    expect(url.pathname).toBe('/api/v1/route/native/USDC');
+    expect(url.searchParams.get('amount')).toBe('100');
+    expect(url.searchParams.get('quote_type')).toBe('buy');
+    expect(url.searchParams.get('slippage_bps')).toBe('100');
   });
 });
 

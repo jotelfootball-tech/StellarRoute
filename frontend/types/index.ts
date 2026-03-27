@@ -59,6 +59,7 @@ export interface PriceQuote {
   total: string;
   quote_type: QuoteType;
   path: PathStep[];
+  priceImpact?: string;
   /** Unix timestamp (seconds) */
   timestamp: number;
 }
@@ -71,8 +72,22 @@ export interface HealthStatus {
   components: Record<string, string>;
 }
 
+export type ApiErrorCode =
+  | 'internal_error'
+  | 'bad_request'
+  | 'not_found'
+  | 'validation_error'
+  | 'rate_limit_exceeded'
+  | 'overloaded'
+  | 'unauthorized'
+  | 'invalid_asset'
+  | 'no_route'
+  | 'stale_market_data'
+  | 'network_error'
+  | 'unknown_error';
+
 export interface ApiError {
-  error: string;
+  error: ApiErrorCode;
   message: string;
   details?: unknown;
 }
