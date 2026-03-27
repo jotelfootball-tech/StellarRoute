@@ -1,10 +1,14 @@
 //! Redis caching layer
 
+pub mod invalidation;
+
 use redis::{aio::ConnectionManager, AsyncCommands, RedisError};
 use serde::{de::DeserializeOwned, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, warn};
+
+pub use invalidation::{CacheInvalidationManager, LiquidityUpdateEvent};
 
 /// Cache manager for Redis operations
 #[derive(Clone)]
