@@ -4,6 +4,7 @@ import "./globals.css";
 import { Providers } from "./providers";
 import { Toaster } from "@/components/ui/sonner";
 import { AppShell } from "@/components/layout/app-shell";
+import ErrorBoundary from "../components/ErrorBoundary";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -30,11 +31,13 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased min-h-screen flex flex-col`}
       >
+        <ErrorBoundary>
         <Providers>
           <AppShell>
             <main className="flex-1">{children}</main>
           </AppShell>
         </Providers>
+        </ErrorBoundary>
         <Toaster position="top-right" richColors />
       </body>
     </html>
