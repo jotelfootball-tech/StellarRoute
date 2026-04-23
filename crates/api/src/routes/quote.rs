@@ -514,9 +514,9 @@ async fn find_best_price(
                     best_bid_e7: None,
                     best_ask_e7: None,
                     depth_top_n_e7: None,
-                    reserve_a_e7: Some((c.available_amount * 1e7) as i128),
-                    reserve_b_e7: Some((c.available_amount * 1e7) as i128),
-                    tvl_e7: Some((c.available_amount * 2e7) as i128),
+                    reserve_a_e7: Some(c.available_amount_e7 as i128),
+                    reserve_b_e7: Some(c.available_amount_e7 as i128),
+                    tvl_e7: Some((c.available_amount_e7 * 2) as i128),
                     last_updated_at: Some(now),
                 }
             } else {
@@ -524,8 +524,8 @@ async fn find_best_price(
                     venue_ref: c.venue_ref.clone(),
                     venue_type: VenueType::Sdex,
                     best_bid_e7: None,
-                    best_ask_e7: Some((c.price * 1e7) as i128),
-                    depth_top_n_e7: Some((c.available_amount * 1e7) as i128),
+                    best_ask_e7: Some(c.price_e7 as i128),
+                    depth_top_n_e7: Some(c.available_amount_e7 as i128),
                     reserve_a_e7: None,
                     reserve_b_e7: None,
                     tvl_e7: None,
@@ -694,6 +694,8 @@ struct DirectVenueCandidate {
     venue_ref: String,
     price: f64,
     available_amount: f64,
+    price_e7: i64,
+    available_amount_e7: i64,
 }
 
 impl DirectVenueCandidate {
@@ -803,7 +805,9 @@ async fn fetch_source_candidates(
                     venue_type,
                     venue_ref,
                     price::text as price,
-                    available_amount::text as available_amount
+                    available_amount::text as available_amount,
+                    price_e7,
+                    available_amount_e7
                 from normalized_liquidity
         where selling_asset_id = $1
           and buying_asset_id = $2
@@ -826,11 +830,15 @@ async fn fetch_source_candidates(
                 .get::<String, _>("available_amount")
                 .parse()
                 .unwrap_or(0.0);
+            let price_e7: i64 = row.get("price_e7");
+            let available_amount_e7: i64 = row.get("available_amount_e7");
             DirectVenueCandidate {
                 venue_type,
                 venue_ref,
                 price,
                 available_amount,
+                price_e7,
+                available_amount_e7,
             }
         })
         .collect())
@@ -926,6 +934,8 @@ mod tests {
             venue_ref: venue_ref.to_string(),
             price,
             available_amount,
+            price_e7: (price * 1e7) as i64,
+            available_amount_e7: (available_amount * 1e7) as i64,
         }
     }
 

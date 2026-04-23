@@ -1,11 +1,10 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
 use tracing::{info, warn};
 use rand::Rng;
 
-use crate::load_test::{LoadTestMetrics, LoadTestResults, percentile};
+use crate::load_test::{LoadTestMetrics, percentile};
 
 /// Traffic mix configuration
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -169,25 +168,20 @@ impl LoadTestHarness {
     {
         info!("Starting load test harness: {}", self.config.name);
         let start_time = Instant::now();
-        let (tx, mut rx) = mpsc::channel(self.config.concurrent_users * 2);
         
         // Spawn workers
         let mut workers = vec![];
-        for i in 0..self.config.concurrent_users {
+        for _ in 0..self.config.concurrent_users {
             let config = self.config.clone();
             let metrics = self.metrics.clone();
             let request_gen = request_gen.clone();
             
             let worker = tokio::spawn(async move {
-                let mut rng = rand::thread_rng();
                 let interval = Duration::from_secs_f64(1.0 / (config.requests_per_second as f64 / config.concurrent_users as f64));
                 let mut ticker = tokio::time::interval(interval);
                 
                 for _ in 0..(config.total_requests / config.concurrent_users) {
                     ticker.tick().await;
-                    
-                    let traffic_type = select_traffic_type(&config.traffic_mix, &mut rng);
-                    let amount = generate_amount(&config.amount_distribution, &mut rng);
                     
                     let req_start = Instant::now();
                     
@@ -196,13 +190,20 @@ impl LoadTestHarness {
                         tokio::time::sleep(Duration::from_millis(config.degradation.db_latency_ms)).await;
                     }
                     
-                    let mut should_fail = false;
-                    if config.degradation.db_error_rate > 0.0 && rng.gen::<f64>() < config.degradation.db_error_rate {
-                        should_fail = true;
-                    }
-                    if config.degradation.rpc_error_rate > 0.0 && rng.gen::<f64>() < config.degradation.rpc_error_rate {
-                        should_fail = true;
-                    }
+                    let (traffic_type, amount, should_fail) = {
+                        let mut rng = rand::thread_rng();
+                        let traffic_type = select_traffic_type(&config.traffic_mix, &mut rng);
+                        let amount = generate_amount(&config.amount_distribution, &mut rng);
+                        
+                        let mut should_fail = false;
+                        if config.degradation.db_error_rate > 0.0 && rng.gen::<f64>() < config.degradation.db_error_rate {
+                            should_fail = true;
+                        }
+                        if config.degradation.rpc_error_rate > 0.0 && rng.gen::<f64>() < config.degradation.rpc_error_rate {
+                            should_fail = true;
+                        }
+                        (traffic_type, amount, should_fail)
+                    };
 
                     let result = if should_fail {
                         Err("Simulated dependency failure".to_string())
@@ -235,7 +236,7 @@ impl LoadTestHarness {
         }).await;
 
         let duration = start_time.elapsed();
-        let (successful, failed, rejected, mut latencies) = self.metrics.snapshot().await;
+        let (successful, failed, _rejected, mut latencies) = self.metrics.snapshot().await;
         
         latencies.sort();
         

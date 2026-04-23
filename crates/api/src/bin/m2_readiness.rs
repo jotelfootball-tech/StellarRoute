@@ -215,19 +215,19 @@ async fn check_pathfinding_latency() -> CheckResult {
 async fn check_multi_hop_support() -> CheckResult {
     // Check if the RoutingEngine can handle multiple hops in config
     let engine = stellarroute_routing::RoutingEngine::new();
-    let config = engine.pathfinder().config();
+    let max_hops = engine.routing_policy().max_hops;
     
-    if config.max_hops >= 2 {
+    if max_hops >= 2 {
         CheckResult {
             name: "Multi-hop Support".to_string(),
             status: "Pass".to_string(),
-            message: format!("Max hops configured to {}", config.max_hops),
+            message: format!("Max hops configured to {}", max_hops),
         }
     } else {
         CheckResult {
             name: "Multi-hop Support".to_string(),
             status: "Fail".to_string(),
-            message: format!("Max hops restricted to {}", config.max_hops),
+            message: format!("Max hops restricted to {}", max_hops),
         }
     }
 }
