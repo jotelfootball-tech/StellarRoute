@@ -7,6 +7,7 @@ import * as freighter from "@stellar/freighter-api";
 
 beforeEach(() => {
   vi.clearAllMocks();
+  window.localStorage.clear();
 });
 
 afterEach(() => {
@@ -24,8 +25,11 @@ function WalletConsumer() {
     isLoading,
     networkMismatch,
     stubSpendableBalance,
+    autoReconnectPreferred,
     connect,
+    reconnect,
     disconnect,
+    setAutoReconnectPreferred,
   } = useWallet();
 
   return (
@@ -38,8 +42,12 @@ function WalletConsumer() {
       <span data-testid="loading">{String(isLoading)}</span>
       <span data-testid="mismatch">{String(networkMismatch)}</span>
       <span data-testid="balance">{stubSpendableBalance ?? "none"}</span>
+      <span data-testid="autoReconnect">{String(autoReconnectPreferred)}</span>
       <button onClick={() => connect("freighter")}>Connect Freighter</button>
+      <button onClick={reconnect}>Reconnect</button>
       <button onClick={disconnect}>Disconnect</button>
+      <button onClick={() => setAutoReconnectPreferred(false)}>Disable auto reconnect</button>
+      <button onClick={() => setAutoReconnectPreferred(true)}>Enable auto reconnect</button>
     </div>
   );
 }
@@ -162,5 +170,90 @@ describe("WalletProvider", () => {
       "useWallet must be used within a WalletProvider"
     );
     spy.mockRestore();
+  });
+
+  it("persists auto reconnect preference changes", async () => {
+    const user = userEvent.setup();
+    renderWithProvider();
+
+    expect(screen.getByTestId("autoReconnect").textContent).toBe("true");
+
+    await user.click(
+      screen.getByRole("button", { name: "Disable auto reconnect" }),
+    );
+    expect(screen.getByTestId("autoReconnect").textContent).toBe("false");
+    expect(
+      window.localStorage.getItem("stellarroute.wallet.autoReconnect"),
+    ).toBe("false");
+
+    await user.click(
+      screen.getByRole("button", { name: "Enable auto reconnect" }),
+    );
+    expect(screen.getByTestId("autoReconnect").textContent).toBe("true");
+    expect(
+      window.localStorage.getItem("stellarroute.wallet.autoReconnect"),
+    ).toBe("true");
+  });
+
+  it("auto reconnects on mount when preference is enabled and a wallet was previously used", async () => {
+    window.localStorage.setItem("stellarroute.wallet.autoReconnect", "true");
+    window.localStorage.setItem("stellarroute.wallet.lastWalletId", "freighter");
+
+    vi.mocked(freighter.requestAccess).mockResolvedValueOnce({
+      address: "GABCDEFGHIJKLMNOPWXYZ",
+    });
+    vi.mocked(freighter.getAddress).mockResolvedValueOnce({
+      address: "GABCDEFGHIJKLMNOPWXYZ",
+    });
+    vi.mocked(freighter.getNetworkDetails).mockResolvedValueOnce({
+      network: "testnet",
+      networkUrl: "",
+      networkPassphrase: "",
+    });
+
+    renderWithProvider();
+
+    await waitFor(() => {
+      expect(screen.getByTestId("connected").textContent).toBe("true");
+    });
+    expect(screen.getByTestId("walletId").textContent).toBe("freighter");
+  });
+
+  it("does not auto reconnect on mount when preference is disabled", async () => {
+    window.localStorage.setItem("stellarroute.wallet.autoReconnect", "false");
+    window.localStorage.setItem("stellarroute.wallet.lastWalletId", "freighter");
+
+    renderWithProvider();
+
+    await waitFor(() => {
+      expect(screen.getByTestId("connected").textContent).toBe("false");
+    });
+    expect(freighter.requestAccess).not.toHaveBeenCalled();
+  });
+
+  it("recovers disconnected session when reconnect is triggered", async () => {
+    window.localStorage.setItem("stellarroute.wallet.lastWalletId", "freighter");
+
+    vi.mocked(freighter.requestAccess).mockResolvedValueOnce({
+      address: "GABCDEFGHIJKLMNOPWXYZ",
+    });
+    vi.mocked(freighter.getAddress).mockResolvedValueOnce({
+      address: "GABCDEFGHIJKLMNOPWXYZ",
+    });
+    vi.mocked(freighter.getNetworkDetails).mockResolvedValueOnce({
+      network: "testnet",
+      networkUrl: "",
+      networkPassphrase: "",
+    });
+
+    const user = userEvent.setup();
+    renderWithProvider();
+
+    await user.click(screen.getByRole("button", { name: "Reconnect" }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("connected").textContent).toBe("true");
+    });
+    expect(screen.getByTestId("walletId").textContent).toBe("freighter");
   });
 });

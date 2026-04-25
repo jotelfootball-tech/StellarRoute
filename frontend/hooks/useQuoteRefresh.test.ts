@@ -1,7 +1,8 @@
-import { act, renderHook, waitFor } from "@testing-library/react";
+import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PriceQuote } from "@/types";
 import { StellarRouteApiError, stellarRouteClient } from "@/lib/api/client";
+import { QUOTE_RETRY_EVENT_NAME } from "@/lib/quote-retry";
 import { useQuoteRefresh } from "./useQuoteRefresh";
 
 vi.mock("@/lib/api/client", async () => {
@@ -32,6 +33,7 @@ function buildQuote(total: string): PriceQuote {
 
 describe("useQuoteRefresh retries", () => {
   afterEach(() => {
+    cleanup();
     vi.useRealTimers();
     vi.clearAllMocks();
   });
@@ -141,5 +143,108 @@ describe("useQuoteRefresh retries", () => {
 
     expect(getQuoteMock).toHaveBeenCalledTimes(2);
     expect(result.current.data?.total).toBe("98.0");
+  });
+
+  it("applies bounded exponential backoff with jitter and allows cancelling queued retries", async () => {
+    vi.useFakeTimers();
+
+    const getQuoteMock = vi.mocked(stellarRouteClient.getQuote);
+    getQuoteMock.mockRejectedValue(new Error("Failed to fetch"));
+
+    const telemetry = vi.fn();
+
+    const { result } = renderHook(() =>
+      useQuoteRefresh("native", "USDC:G...", 100, "sell", {
+        debounceMs: 0,
+        maxAutoRetries: 3,
+        retryBackoffMs: 100,
+        maxRetryBackoffMs: 150,
+        retryJitterRatio: 0.5,
+        retryRandom: () => 1,
+        isOnline: true,
+        onRetryEvent: telemetry,
+      }),
+    );
+
+    await act(async () => {
+      vi.advanceTimersByTime(1);
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(result.current.hasPendingRetry).toBe(true);
+      expect(result.current.retryAttempt).toBe(1);
+    });
+
+    expect(telemetry).toHaveBeenCalledWith(
+      expect.objectContaining({
+        stage: "scheduled",
+        attempt: 1,
+        delayMs: 150,
+      }),
+    );
+
+    act(() => {
+      result.current.cancelRetry();
+    });
+
+    expect(result.current.hasPendingRetry).toBe(false);
+    expect(result.current.retryAttempt).toBe(0);
+    expect(telemetry).toHaveBeenCalledWith(
+      expect.objectContaining({
+        stage: "cancelled",
+        attempt: 1,
+        delayMs: 150,
+      }),
+    );
+
+    act(() => {
+      vi.advanceTimersByTime(300);
+    });
+
+    expect(getQuoteMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("emits window telemetry events for scheduled and recovered retries", async () => {
+    const getQuoteMock = vi.mocked(stellarRouteClient.getQuote);
+    let callCount = 0;
+    getQuoteMock.mockImplementation(async () => {
+      callCount += 1;
+      if (callCount === 1) {
+        throw new Error("Failed to fetch");
+      }
+      return buildQuote("101.0");
+    });
+
+    const telemetryListener = vi.fn();
+    window.addEventListener(QUOTE_RETRY_EVENT_NAME, telemetryListener as EventListener);
+
+    try {
+      const { result } = renderHook(() =>
+        useQuoteRefresh("native", "USDC:G...", 100, "sell", {
+          debounceMs: 1,
+          maxAutoRetries: 1,
+          retryBackoffMs: 5,
+          maxRetryBackoffMs: 50,
+          retryJitterRatio: 0,
+          isOnline: true,
+        }),
+      );
+
+      await waitFor(() => {
+        expect(result.current.data?.total).toBe("101.0");
+      });
+
+      const stages = telemetryListener.mock.calls.map(([event]) =>
+        (event as CustomEvent).detail.stage,
+      );
+      expect(stages).toContain("scheduled");
+      expect(stages).toContain("succeeded");
+    } finally {
+      window.removeEventListener(
+        QUOTE_RETRY_EVENT_NAME,
+        telemetryListener as EventListener,
+      );
+    }
   });
 });

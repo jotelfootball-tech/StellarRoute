@@ -198,6 +198,29 @@ export function SwapCard() {
               Quote outdated — refresh for latest price
             </span>
           )}
+          {quote.isRecovering && (
+            <div
+              data-testid="recovering-indicator"
+              className="flex items-center justify-between gap-3 rounded-xl border border-blue-500/20 bg-blue-500/5 px-3 py-2"
+            >
+              <span className="text-xs text-blue-500 font-medium">
+                {quote.hasPendingRetry
+                  ? `Retrying quote in ${Math.max(1, Math.ceil(quote.pendingRetryRemainingMs / 1000))}s...`
+                  : 'Retrying quote...'}
+              </span>
+              {quote.hasPendingRetry && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={quote.cancelRetry}
+                  className="h-7 rounded-lg px-2 text-[11px] font-semibold text-blue-600 hover:bg-blue-500/10 hover:text-blue-700"
+                >
+                  Cancel retry
+                </Button>
+              )}
+            </div>
+          )}
 
           {/* Action Button */}
           <div className="pt-2">
